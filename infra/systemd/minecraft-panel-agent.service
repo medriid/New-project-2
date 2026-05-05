@@ -1,0 +1,22 @@
+[Unit]
+Description=Minecraft VPS Panel Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/minecraft-vps-panel
+EnvironmentFile=/opt/minecraft-vps-panel/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm run start -w apps/agent
+Restart=always
+RestartSec=5
+User=minecraft
+Group=minecraft
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/srv/minecraft-panel
+
+[Install]
+WantedBy=multi-user.target
