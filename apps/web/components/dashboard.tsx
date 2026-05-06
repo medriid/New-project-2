@@ -2,14 +2,18 @@
 
 import {
   Activity,
+  Badge,
   Circle,
+  Crosshair,
   Download,
   FileText,
   Folder,
   FolderTree,
   Gauge,
+  HeartPulse,
   ListRestart,
   LogOut,
+  Package,
   PackageSearch,
   Play,
   Plus,
@@ -20,13 +24,27 @@ import {
   Server,
   Settings,
   Shield,
+  Skull,
   Square,
   Terminal,
   Users,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-import type { FabricLatest, FileEntry, ModrinthSearchHit, ServerRecord } from "@/types/panel";
+import type {
+  AddonKind,
+  FabricLatest,
+  FileEntry,
+  MinecraftColor,
+  ModrinthSearchHit,
+  MotdStyle,
+  PaperLatest,
+  PlayerDetail,
+  PlayerRecord,
+  PlayerSummary,
+  ServerRecord,
+  ServerSoftware,
+} from "@/types/panel";
 
 type DashboardProps = {
   userEmail: string;
@@ -34,23 +52,42 @@ type DashboardProps = {
   ownerEmail: string;
 };
 
-type Tab = "overview" | "console" | "files" | "addons" | "players" | "settings";
-
-type PlayerSummary = {
-  operators: unknown[];
-  whitelist: unknown[];
-  bannedPlayers: unknown[];
-  lastListLine: string | null;
-};
+type Tab = "overview" | "console" | "files" | "mods" | "plugins" | "players" | "settings";
 
 const tabs: Array<{ id: Tab; label: string; icon: typeof Gauge }> = [
   { id: "overview", label: "Overview", icon: Gauge },
   { id: "console", label: "Console", icon: Terminal },
   { id: "files", label: "Files", icon: FolderTree },
-  { id: "addons", label: "Add-ons", icon: PackageSearch },
+  { id: "mods", label: "Mods", icon: Package },
+  { id: "plugins", label: "Plugins", icon: PackageSearch },
   { id: "players", label: "Players", icon: Users },
   { id: "settings", label: "Settings", icon: Settings },
 ];
+
+const colors: MinecraftColor[] = [
+  "white",
+  "gray",
+  "dark_gray",
+  "black",
+  "red",
+  "gold",
+  "yellow",
+  "green",
+  "aqua",
+  "blue",
+  "light_purple",
+  "dark_purple",
+];
+
+const defaultMotd: MotdStyle = {
+  text: "Z7i Minecraft",
+  color: "white",
+  bold: true,
+  italic: false,
+  underline: false,
+  strikethrough: false,
+  obfuscated: false,
+};
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -85,6 +122,15 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function coordinateLine(player: PlayerRecord | PlayerDetail | null) {
+  const coordinates = player?.lastCoordinates;
+  if (!coordinates) {
+    return "Unknown";
+  }
+
+  return `${coordinates.world} ${coordinates.x.toFixed(1)}, ${coordinates.y.toFixed(1)}, ${coordinates.z.toFixed(1)}`;
+}
+
 function StatusDot({ status }: { status: ServerRecord["status"] }) {
   return (
     <span className={`status-dot ${status}`}>
@@ -98,12 +144,13 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("overview");
-  const [latest, setLatest] = useState<FabricLatest | null>(null);
+  const [fabricLatest, setFabricLatest] = useState<FabricLatest | null>(null);
+  const [paperLatest, setPaperLatest] = useState<PaperLatest | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const [newName, setNewName] = useState("Fabric Survival");
-  const [newMemory, setNewMemory] = useState(4096);
+  const [newName, setNewName] = useState("Z7i Minecraft");
+  const [newSoftware, setNewSoftware] = useState<ServerSoftware>("paper");
   const [newPort, setNewPort] = useState(25565);
 
   const [logLines, setLogLines] = useState<string[]>([]);
@@ -116,12 +163,21 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
 
   const [addonQuery, setAddonQuery] = useState("");
   const [addonHits, setAddonHits] = useState<ModrinthSearchHit[]>([]);
-  const [players, setPlayers] = useState<PlayerSummary | null>(null);
+
+  const [playerSummary, setPlayerSummary] = useState<PlayerSummary | null>(null);
+  const [selectedPlayerKey, setSelectedPlayerKey] = useState<string | null>(null);
+  const [playerDetail, setPlayerDetail] = useState<PlayerDetail | null>(null);
+
+  const [settingsName, setSettingsName] = useState("Z7i Minecraft");
+  const [settingsMotd, setSettingsMotd] = useState<MotdStyle>(defaultMotd);
 
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedId) ?? servers[0] ?? null,
     [selectedId, servers],
   );
+
+  const addonKind: AddonKind = activeTab === "mods" ? "mod" : "plugin";
+  const onlinePlayers = playerSummary?.players.filter((player) => player.online).length ?? 0;
 
   async function refreshServers() {
     const data = await requestJson<ServerRecord[]>("/api/servers");
@@ -130,8 +186,12 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
   }
 
   async function refreshLatest() {
-    const data = await requestJson<FabricLatest>("/api/fabric/latest");
-    setLatest(data);
+    const [fabric, paper] = await Promise.all([
+      requestJson<FabricLatest>("/api/fabric/latest"),
+      requestJson<PaperLatest>("/api/paper/latest"),
+    ]);
+    setFabricLatest(fabric);
+    setPaperLatest(paper);
   }
 
   async function runTask(task: () => Promise<void>, success?: string) {
@@ -162,6 +222,8 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
       return;
     }
 
+    setSettingsName(selectedServer.name);
+    setSettingsMotd(selectedServer.motd ?? defaultMotd);
     setLogLines([]);
     const source = new EventSource(`/api/servers/${selectedServer.id}/logs/stream`);
     source.onmessage = (event) => {
@@ -183,6 +245,17 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
     void loadFiles(".");
   }, [selectedServer?.id, isOwner]);
 
+  useEffect(() => {
+    if (activeTab === "players" && selectedServer) {
+      void refreshPlayers();
+    }
+  }, [activeTab, selectedServer?.id]);
+
+  useEffect(() => {
+    setAddonHits([]);
+    setAddonQuery("");
+  }, [activeTab]);
+
   async function createServer(event: FormEvent) {
     event.preventDefault();
     await runTask(async () => {
@@ -190,8 +263,9 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
         method: "POST",
         body: JSON.stringify({
           name: newName,
-          memoryMb: newMemory,
+          software: newSoftware,
           port: newPort,
+          motd: { ...defaultMotd, text: newName },
         }),
       });
       await refreshServers();
@@ -277,7 +351,7 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
 
     await runTask(async () => {
       const data = await requestJson<{ hits: ModrinthSearchHit[] }>(
-        `/api/addons/search?q=${encodeURIComponent(addonQuery)}&gameVersion=${encodeURIComponent(
+        `/api/addons/search?kind=${addonKind}&q=${encodeURIComponent(addonQuery)}&gameVersion=${encodeURIComponent(
           selectedServer.minecraftVersion,
         )}`,
       );
@@ -293,10 +367,10 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
     await runTask(async () => {
       await requestJson("/api/addons/install", {
         method: "POST",
-        body: JSON.stringify({ serverId: selectedServer.id, projectId }),
+        body: JSON.stringify({ serverId: selectedServer.id, projectId, kind: addonKind }),
       });
-      await loadFiles("mods");
-    }, "Add-on installed");
+      await loadFiles(addonKind === "mod" ? "mods" : "plugins");
+    }, addonKind === "mod" ? "Mod installed" : "Plugin installed");
   }
 
   async function refreshPlayers() {
@@ -305,8 +379,59 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
     }
 
     await runTask(async () => {
-      setPlayers(await requestJson<PlayerSummary>(`/api/servers/${selectedServer.id}/players`));
+      const summary = await requestJson<PlayerSummary>(`/api/servers/${selectedServer.id}/players`);
+      setPlayerSummary(summary);
+      const key = selectedPlayerKey ?? summary.players[0]?.uuid ?? null;
+      setSelectedPlayerKey(key);
+      if (key) {
+        await loadPlayer(key);
+      }
     });
+  }
+
+  async function loadPlayer(key: string) {
+    if (!selectedServer) {
+      return;
+    }
+
+    const detail = await requestJson<PlayerDetail>(
+      `/api/servers/${selectedServer.id}/players/${encodeURIComponent(key)}`,
+    );
+    setSelectedPlayerKey(detail.uuid);
+    setPlayerDetail(detail);
+  }
+
+  async function playerAction(action: "heal" | "kill") {
+    if (!selectedServer || !playerDetail) {
+      return;
+    }
+
+    await runTask(async () => {
+      const result = await requestJson<{ player: PlayerDetail }>(
+        `/api/servers/${selectedServer.id}/players/${encodeURIComponent(playerDetail.uuid)}`,
+        {
+          method: "POST",
+          body: JSON.stringify({ action }),
+        },
+      );
+      setPlayerDetail(result.player);
+      await refreshPlayers();
+    }, action === "heal" ? "Player healed" : "Player killed");
+  }
+
+  async function saveSettings(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedServer || !isOwner) {
+      return;
+    }
+
+    await runTask(async () => {
+      const updated = await requestJson<ServerRecord>(`/api/servers/${selectedServer.id}/settings`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: settingsName, motd: settingsMotd }),
+      });
+      setServers((current) => current.map((server) => (server.id === updated.id ? updated : server)));
+    }, "Settings saved");
   }
 
   async function signOut() {
@@ -330,26 +455,20 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
             <Server size={21} />
           </div>
           <div>
-            <strong>VPS Panel</strong>
-            <span>Fabric</span>
+            <strong>Z7i Minecraft</strong>
+            <span>{selectedServer ? selectedServer.software : "panel"}</span>
           </div>
         </div>
 
         <div className="server-stack">
-          <div className="sidebar-label">Servers</div>
-          {servers.length === 0 ? (
-            <div className="empty-line">No servers yet</div>
+          <div className="sidebar-label">Server</div>
+          {selectedServer ? (
+            <button className="server-button active" onClick={() => setActiveTab("overview")}>
+              <span>{selectedServer.name}</span>
+              <StatusDot status={selectedServer.status} />
+            </button>
           ) : (
-            servers.map((server) => (
-              <button
-                key={server.id}
-                className={`server-button ${selectedServer?.id === server.id ? "active" : ""}`}
-                onClick={() => setSelectedId(server.id)}
-              >
-                <span>{server.name}</span>
-                <StatusDot status={server.status} />
-              </button>
-            ))
+            <div className="empty-line">Not created</div>
           )}
         </div>
 
@@ -362,6 +481,7 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
                 className={activeTab === tab.id ? "active" : ""}
                 onClick={() => setActiveTab(tab.id)}
                 title={tab.label}
+                disabled={!selectedServer && tab.id !== "overview"}
               >
                 <Icon size={18} />
                 <span>{tab.label}</span>
@@ -384,12 +504,12 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
       <section className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">{selectedServer ? selectedServer.id : "No server selected"}</p>
-            <h1>{selectedServer ? selectedServer.name : "Minecraft control panel"}</h1>
+            <p className="eyebrow">{selectedServer ? selectedServer.id : "single server"}</p>
+            <h1>{selectedServer ? selectedServer.name : "Z7i Minecraft"}</h1>
           </div>
           <div className="top-actions">
             {selectedServer ? <StatusDot status={selectedServer.status} /> : null}
-            <button className="icon-button" onClick={() => void runTask(refreshServers)} title="Refresh servers">
+            <button className="icon-button" onClick={() => void runTask(refreshServers)} title="Refresh">
               <RefreshCw size={18} />
             </button>
             {isOwner && selectedServer ? (
@@ -409,228 +529,354 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
 
         {notice ? <div className="notice">{notice}</div> : null}
 
-        <div className="content-grid">
-          <section className="main-panel">
-            {activeTab === "overview" ? (
-              <div className="overview-grid">
-                <Metric icon={Activity} label="Status" value={selectedServer?.status ?? "none"} />
-                <Metric icon={ListRestart} label="Minecraft" value={selectedServer?.minecraftVersion ?? "-"} />
-                <Metric icon={PackageSearch} label="Fabric Loader" value={selectedServer?.fabricLoaderVersion ?? "-"} />
-                <Metric icon={Shield} label="Owner" value={ownerEmail} />
+        <section className="main-panel">
+          {!selectedServer ? (
+            <CreateServerPanel
+              isOwner={isOwner}
+              busy={busy}
+              newName={newName}
+              newPort={newPort}
+              newSoftware={newSoftware}
+              fabricLatest={fabricLatest}
+              paperLatest={paperLatest}
+              onName={setNewName}
+              onPort={setNewPort}
+              onSoftware={setNewSoftware}
+              onSubmit={createServer}
+            />
+          ) : null}
 
-                {selectedServer ? (
-                  <div className="detail-table">
-                    <div>
-                      <span>Port</span>
-                      <strong>{selectedServer.port}</strong>
-                    </div>
-                    <div>
-                      <span>Memory</span>
-                      <strong>{selectedServer.memoryMb} MB</strong>
-                    </div>
-                    <div>
-                      <span>Path</span>
-                      <strong>{selectedServer.relativePath}</strong>
-                    </div>
-                    <div>
-                      <span>Updated</span>
-                      <strong>{new Date(selectedServer.updatedAt).toLocaleString()}</strong>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            {activeTab === "console" ? (
-              <div className="console-view">
-                <div className="console-output">
-                  {logLines.length === 0 ? (
-                    <span className="muted-text">Waiting for logs</span>
-                  ) : (
-                    logLines.map((line, index) => <pre key={`${line}-${index}`}>{line}</pre>)
-                  )}
+          {selectedServer && activeTab === "overview" ? (
+            <div className="overview-grid panel-scroll">
+              <Metric icon={Activity} label="Status" value={selectedServer.status} />
+              <Metric icon={ListRestart} label="Minecraft" value={selectedServer.minecraftVersion} />
+              <Metric icon={Badge} label="Software" value={selectedServer.software} />
+              <Metric icon={Users} label="Online" value={String(onlinePlayers)} />
+              <div className="detail-table">
+                <div>
+                  <span>Port</span>
+                  <strong>{selectedServer.port}</strong>
                 </div>
-                {isOwner ? (
-                  <form className="command-row" onSubmit={sendConsoleCommand}>
-                    <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="say Hello" />
-                    <button className="icon-button" disabled={!selectedServer || !command.trim()} title="Send command">
-                      <Send size={18} />
-                    </button>
-                  </form>
-                ) : null}
+                <div>
+                  <span>Memory</span>
+                  <strong>6144 MB</strong>
+                </div>
+                <div>
+                  <span>Mode</span>
+                  <strong>{selectedServer.crackedMode ? "Cracked" : "Premium"}</strong>
+                </div>
+                <div>
+                  <span>Owner</span>
+                  <strong>{ownerEmail}</strong>
+                </div>
               </div>
-            ) : null}
+            </div>
+          ) : null}
 
-            {activeTab === "files" ? (
-              <div className="files-view">
-                {!isOwner ? (
-                  <LockedPanel />
+          {selectedServer && activeTab === "console" ? (
+            <div className="console-view">
+              <div className="console-output">
+                {logLines.length === 0 ? (
+                  <span className="muted-text">Waiting for logs</span>
                 ) : (
-                  <>
-                    <div className="file-toolbar">
-                      <button className="tool-button" onClick={() => void loadFiles(parentDir)}>
-                        <Folder size={17} />
-                        <span>Up</span>
-                      </button>
-                      <input value={filePath} onChange={(event) => setFilePath(event.target.value)} />
-                      <button className="tool-button" onClick={() => void openFile(filePath)}>
-                        <FileText size={17} />
-                        <span>Open</span>
-                      </button>
-                      <button className="tool-button" onClick={() => void saveFile()}>
-                        <Save size={17} />
-                        <span>Save</span>
-                      </button>
-                    </div>
-                    <div className="file-layout">
-                      <div className="file-list">
-                        <div className="sidebar-label">{currentDir}</div>
-                        {entries.map((entry) => (
-                          <button
-                            key={entry.path}
-                            onClick={() =>
-                              entry.type === "directory" ? void loadFiles(entry.path) : void openFile(entry.path)
-                            }
-                          >
-                            {entry.type === "directory" ? <Folder size={16} /> : <FileText size={16} />}
-                            <span>{entry.name}</span>
-                            <small>{entry.type === "file" ? formatBytes(entry.size) : ""}</small>
-                          </button>
-                        ))}
-                      </div>
-                      <textarea
-                        className="file-editor"
-                        value={fileContent}
-                        onChange={(event) => setFileContent(event.target.value)}
-                        spellCheck={false}
-                      />
-                    </div>
-                  </>
+                  logLines.map((line, index) => <pre key={`${line}-${index}`}>{line}</pre>)
                 )}
               </div>
-            ) : null}
-
-            {activeTab === "addons" ? (
-              <div className="addons-view">
-                <form className="search-row" onSubmit={searchAddons}>
-                  <Search size={18} />
-                  <input
-                    value={addonQuery}
-                    onChange={(event) => setAddonQuery(event.target.value)}
-                    placeholder="sodium, lithium, fabric api"
-                  />
-                  <button className="tool-button">
-                    <Search size={17} />
-                    <span>Search</span>
+              {isOwner ? (
+                <form className="command-row" onSubmit={sendConsoleCommand}>
+                  <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="say Hello" />
+                  <button className="icon-button" disabled={!command.trim()} title="Send">
+                    <Send size={18} />
                   </button>
                 </form>
-                <div className="addon-list">
-                  {addonHits.map((hit) => (
-                    <article key={hit.project_id} className="addon-row">
-                      <div>
-                        <strong>{hit.title}</strong>
-                        <span>{hit.description}</span>
-                        <small>{hit.downloads.toLocaleString()} downloads</small>
-                      </div>
-                      {isOwner ? (
-                        <button className="icon-button" onClick={() => void installAddon(hit.project_id)} title="Install">
-                          <Download size={18} />
-                        </button>
-                      ) : null}
-                    </article>
-                  ))}
-                </div>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
+          ) : null}
 
-            {activeTab === "players" ? (
-              <div className="players-view">
-                <div className="section-head">
-                  <h2>Players</h2>
-                  <button className="tool-button" onClick={() => void refreshPlayers()}>
-                    <RefreshCw size={17} />
-                    <span>Refresh</span>
-                  </button>
-                </div>
-                <div className="player-grid">
-                  <Metric icon={Users} label="Operators" value={String(players?.operators.length ?? 0)} />
-                  <Metric icon={Shield} label="Whitelist" value={String(players?.whitelist.length ?? 0)} />
-                  <Metric icon={Square} label="Banned" value={String(players?.bannedPlayers.length ?? 0)} />
-                </div>
-                <pre className="players-line">{players?.lastListLine ?? "No player list yet"}</pre>
-              </div>
-            ) : null}
-
-            {activeTab === "settings" ? (
-              <div className="settings-view">
-                {!isOwner ? <LockedPanel /> : null}
-                {isOwner && selectedServer ? (
-                  <div className="action-grid">
-                    <button onClick={() => void serverAction("start")}>
-                      <Play size={18} />
-                      <span>Start server</span>
+          {selectedServer && activeTab === "files" ? (
+            <div className="files-view">
+              {!isOwner ? (
+                <LockedPanel />
+              ) : (
+                <>
+                  <div className="file-toolbar">
+                    <button className="tool-button" onClick={() => void loadFiles(parentDir)}>
+                      <Folder size={17} />
+                      <span>Up</span>
                     </button>
-                    <button onClick={() => void serverAction("stop")}>
-                      <Square size={18} />
-                      <span>Stop server</span>
+                    <input value={filePath} onChange={(event) => setFilePath(event.target.value)} />
+                    <button className="tool-button" onClick={() => void openFile(filePath)}>
+                      <FileText size={17} />
+                      <span>Open</span>
                     </button>
-                    <button onClick={() => void openFile("server.properties")}>
-                      <FileText size={18} />
-                      <span>Open properties</span>
+                    <button className="tool-button" onClick={() => void saveFile()}>
+                      <Save size={17} />
+                      <span>Save</span>
                     </button>
                   </div>
-                ) : null}
-              </div>
-            ) : null}
-          </section>
+                  <div className="file-layout">
+                    <div className="file-list">
+                      <div className="sidebar-label">{currentDir}</div>
+                      {entries.map((entry) => (
+                        <button
+                          key={entry.path}
+                          onClick={() =>
+                            entry.type === "directory" ? void loadFiles(entry.path) : void openFile(entry.path)
+                          }
+                        >
+                          {entry.type === "directory" ? <Folder size={16} /> : <FileText size={16} />}
+                          <span>{entry.name}</span>
+                          <small>{entry.type === "file" ? formatBytes(entry.size) : ""}</small>
+                        </button>
+                      ))}
+                    </div>
+                    <textarea
+                      className="file-editor"
+                      value={fileContent}
+                      onChange={(event) => setFileContent(event.target.value)}
+                      spellCheck={false}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          ) : null}
 
-          {isOwner ? (
-            <aside className="side-panel">
-              <div className="section-head">
-                <h2>Create server</h2>
-                <Plus size={18} />
-              </div>
-              <form className="create-form" onSubmit={createServer}>
-                <label>
-                  Name
-                  <input value={newName} onChange={(event) => setNewName(event.target.value)} />
-                </label>
-                <label>
-                  Memory MB
-                  <input
-                    type="number"
-                    min={1024}
-                    max={32768}
-                    step={512}
-                    value={newMemory}
-                    onChange={(event) => setNewMemory(Number(event.target.value))}
-                  />
-                </label>
-                <label>
-                  Port
-                  <input
-                    type="number"
-                    min={25565}
-                    max={25600}
-                    value={newPort}
-                    onChange={(event) => setNewPort(Number(event.target.value))}
-                  />
-                </label>
-                <div className="version-strip">
-                  <span>{latest?.latestStableGame ?? "-"}</span>
-                  <span>{latest?.latestLoader ?? "-"}</span>
-                  <span>{latest?.latestInstaller ?? "-"}</span>
-                </div>
-                <button className="primary-action" disabled={busy}>
-                  <Plus size={18} />
-                  <span>Create Fabric server</span>
+          {selectedServer && (activeTab === "mods" || activeTab === "plugins") ? (
+            <div className="addons-view">
+              <form className="search-row" onSubmit={searchAddons}>
+                <Search size={18} />
+                <input
+                  value={addonQuery}
+                  onChange={(event) => setAddonQuery(event.target.value)}
+                  placeholder={addonKind === "mod" ? "sodium, lithium, fabric api" : "luckperms, geyser, vault"}
+                />
+                <button className="tool-button">
+                  <Search size={17} />
+                  <span>Search</span>
                 </button>
               </form>
-            </aside>
+              <div className="addon-list panel-scroll">
+                {addonHits.map((hit) => (
+                  <article key={hit.project_id} className="addon-row">
+                    <div>
+                      <strong>{hit.title}</strong>
+                      <span>{hit.description}</span>
+                      <small>{hit.downloads.toLocaleString()} downloads</small>
+                    </div>
+                    {isOwner ? (
+                      <button className="icon-button" onClick={() => void installAddon(hit.project_id)} title="Install">
+                        <Download size={18} />
+                      </button>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+            </div>
           ) : null}
-        </div>
+
+          {selectedServer && activeTab === "players" ? (
+            <div className="players-view">
+              <div className="section-head">
+                <h2>Players</h2>
+                <button className="tool-button" onClick={() => void refreshPlayers()}>
+                  <RefreshCw size={17} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+              <div className="players-layout">
+                <div className="player-list">
+                  {(playerSummary?.players ?? []).map((player) => (
+                    <button
+                      key={player.uuid}
+                      className={selectedPlayerKey === player.uuid ? "active" : ""}
+                      onClick={() => void loadPlayer(player.uuid)}
+                    >
+                      <img src={player.avatarUrl} alt="" />
+                      <span>{player.name}</span>
+                      <span className={`status-dot ${player.online ? "running" : "stopped"}`}>
+                        <Circle size={10} fill="currentColor" />
+                        {player.online ? "online" : "offline"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <div className="player-detail">
+                  {playerDetail ? (
+                    <>
+                      <div className="player-hero">
+                        <img src={playerDetail.avatarUrl} alt="" />
+                        <div>
+                          <h2>{playerDetail.name}</h2>
+                          <span>{playerDetail.uuid}</span>
+                        </div>
+                      </div>
+                      <div className="player-grid">
+                        <Metric icon={HeartPulse} label="Health" value={String(playerDetail.health ?? "-")} />
+                        <Metric icon={Gauge} label="Food" value={String(playerDetail.foodLevel ?? "-")} />
+                        <Metric icon={Crosshair} label="Coords" value={coordinateLine(playerDetail)} />
+                      </div>
+                      {isOwner ? (
+                        <div className="player-actions">
+                          <button className="tool-button" onClick={() => void playerAction("heal")}>
+                            <HeartPulse size={17} />
+                            <span>Heal</span>
+                          </button>
+                          <button className="tool-button" onClick={() => void playerAction("kill")}>
+                            <Skull size={17} />
+                            <span>Kill</span>
+                          </button>
+                        </div>
+                      ) : null}
+                      <div className="inventory-list">
+                        {playerDetail.inventory.length === 0 ? (
+                          <span className="muted-text">Inventory unavailable</span>
+                        ) : (
+                          playerDetail.inventory.map((item) => (
+                            <div key={`${item.slot}-${item.id}`}>
+                              <strong>{item.slot}</strong>
+                              <span>{item.id}</span>
+                              <small>x{item.count}</small>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <LockedPanel label="No player selected" />
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {selectedServer && activeTab === "settings" ? (
+            <div className="settings-view panel-scroll">
+              {!isOwner ? <LockedPanel /> : null}
+              {isOwner ? (
+                <form className="settings-form" onSubmit={saveSettings}>
+                  <label>
+                    Server name
+                    <input value={settingsName} onChange={(event) => setSettingsName(event.target.value)} />
+                  </label>
+                  <label>
+                    Description
+                    <input
+                      value={settingsMotd.text}
+                      onChange={(event) => setSettingsMotd((current) => ({ ...current, text: event.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Colour
+                    <select
+                      value={settingsMotd.color}
+                      onChange={(event) =>
+                        setSettingsMotd((current) => ({
+                          ...current,
+                          color: event.target.value as MinecraftColor,
+                        }))
+                      }
+                    >
+                      {colors.map((color) => (
+                        <option key={color} value={color}>
+                          {color.replaceAll("_", " ")}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="toggle-grid">
+                    <Toggle label="Bold" value={settingsMotd.bold} onChange={(value) => setSettingsMotd((current) => ({ ...current, bold: value }))} />
+                    <Toggle label="Italic" value={settingsMotd.italic} onChange={(value) => setSettingsMotd((current) => ({ ...current, italic: value }))} />
+                    <Toggle label="Underline" value={settingsMotd.underline} onChange={(value) => setSettingsMotd((current) => ({ ...current, underline: value }))} />
+                    <Toggle label="Strike" value={settingsMotd.strikethrough} onChange={(value) => setSettingsMotd((current) => ({ ...current, strikethrough: value }))} />
+                    <Toggle label="Magic" value={settingsMotd.obfuscated} onChange={(value) => setSettingsMotd((current) => ({ ...current, obfuscated: value }))} />
+                  </div>
+                  <div className={`motd-preview mc-${settingsMotd.color} ${settingsMotd.bold ? "bold" : ""} ${settingsMotd.italic ? "italic" : ""} ${settingsMotd.underline ? "underline" : ""} ${settingsMotd.strikethrough ? "strike" : ""}`}>
+                    {settingsMotd.text}
+                  </div>
+                  <button className="primary-action" disabled={busy}>
+                    <Save size={18} />
+                    <span>Save settings</span>
+                  </button>
+                </form>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
       </section>
     </main>
+  );
+}
+
+function CreateServerPanel({
+  isOwner,
+  busy,
+  newName,
+  newSoftware,
+  newPort,
+  fabricLatest,
+  paperLatest,
+  onName,
+  onSoftware,
+  onPort,
+  onSubmit,
+}: {
+  isOwner: boolean;
+  busy: boolean;
+  newName: string;
+  newSoftware: ServerSoftware;
+  newPort: number;
+  fabricLatest: FabricLatest | null;
+  paperLatest: PaperLatest | null;
+  onName: (value: string) => void;
+  onSoftware: (value: ServerSoftware) => void;
+  onPort: (value: number) => void;
+  onSubmit: (event: FormEvent) => void;
+}) {
+  if (!isOwner) {
+    return <LockedPanel />;
+  }
+
+  return (
+    <form className="create-single" onSubmit={onSubmit}>
+      <div>
+        <p className="eyebrow">Create</p>
+        <h2>Z7i Minecraft</h2>
+      </div>
+      <div className="create-grid">
+        <label>
+          Name
+          <input value={newName} onChange={(event) => onName(event.target.value)} />
+        </label>
+        <label>
+          Port
+          <input
+            type="number"
+            min={25565}
+            max={25600}
+            value={newPort}
+            onChange={(event) => onPort(Number(event.target.value))}
+          />
+        </label>
+      </div>
+      <div className="software-switch">
+        <button type="button" className={newSoftware === "paper" ? "active" : ""} onClick={() => onSoftware("paper")}>
+          Paper
+        </button>
+        <button type="button" className={newSoftware === "fabric" ? "active" : ""} onClick={() => onSoftware("fabric")}>
+          Fabric
+        </button>
+      </div>
+      <div className="version-strip">
+        <span>{newSoftware === "paper" ? (paperLatest?.latestVersion ?? "-") : (fabricLatest?.latestStableGame ?? "-")}</span>
+        <span>{newSoftware === "paper" ? `build ${paperLatest?.latestBuild ?? "-"}` : (fabricLatest?.latestLoader ?? "-")}</span>
+        <span>6144 MB</span>
+      </div>
+      <button className="primary-action" disabled={busy}>
+        <Plus size={18} />
+        <span>Create server</span>
+      </button>
+    </form>
   );
 }
 
@@ -652,11 +898,28 @@ function Metric({
   );
 }
 
-function LockedPanel() {
+function Toggle({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <label className="toggle">
+      <input type="checkbox" checked={value} onChange={(event) => onChange(event.target.checked)} />
+      <span>{label}</span>
+    </label>
+  );
+}
+
+function LockedPanel({ label = "Owner access required" }: { label?: string }) {
   return (
     <div className="locked-panel">
       <Shield size={24} />
-      <strong>Owner access required</strong>
+      <strong>{label}</strong>
     </div>
   );
 }

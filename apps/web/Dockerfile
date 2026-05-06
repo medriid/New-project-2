@@ -1,8 +1,9 @@
-FROM node:22-bookworm-slim AS deps
+FROM deps AS build
 WORKDIR /app
-COPY package.json package-lock.json* ./
-COPY apps/web/package.json apps/web/package.json
-RUN npm install --workspace apps/web
+COPY tsconfig.base.json tsconfig.base.json
+COPY .env ./apps/web/.env
+COPY apps/web apps/web
+RUN npm run build -w apps/web
 
 FROM deps AS build
 WORKDIR /app

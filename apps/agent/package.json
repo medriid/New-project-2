@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "prismarine-nbt": "^2.8.0",
     "tsx": "^4.21.0"
   },
   "devDependencies": {

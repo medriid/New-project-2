@@ -49,8 +49,8 @@ export default function LoginCard({ authConfigured, ownerEmail }: LoginCardProps
           <Server size={28} />
         </div>
         <div>
-          <p className="eyebrow">Minecraft VPS Panel</p>
-          <h1>Control Fabric servers from your own VPS.</h1>
+          <p className="eyebrow">Z7i Minecraft</p>
+          <h1>Own the server from one clean panel.</h1>
         </div>
 
         <div className="login-grid">

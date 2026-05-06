@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Minecraft VPS Panel",
-  description: "Fabric server control panel",
+  title: "Z7i Minecraft",
+  description: "Z7i Minecraft server control panel",
 };
 
 export default function RootLayout({

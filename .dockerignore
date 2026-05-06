@@ -3,6 +3,4 @@
 node_modules
 apps/**/.next
 apps/**/dist
-.env
-.env.*
 *.log
