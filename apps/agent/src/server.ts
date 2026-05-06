@@ -652,7 +652,7 @@ async function startServer(id: string) {
   await updateServer(id, { status: "starting" });
   const root = serverPath(server);
   const child = spawn(
-    "java",
+    "/opt/jdk-25/bin/java",
     [`-Xms${fixedMemoryMb}M`, `-Xmx${fixedMemoryMb}M`, "-jar", server.jarName, "nogui"],
     {
       cwd: root,
@@ -833,13 +833,14 @@ async function streamServerArchive(id: string, response: ServerResponse) {
     "Cache-Control": "no-store",
   });
 
-  zip.outputStream.pipe(response);
   zip.on("error", (error) => {
     response.destroy(error);
   });
 
+  const archiveDone = pipeline(zip.outputStream, response);
   await addDirectoryToZip(zip, root, root);
   zip.end();
+  await archiveDone;
   await appendLog(id, `Exported server files as ${filename}`);
 }
 
