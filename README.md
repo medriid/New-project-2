@@ -90,6 +90,7 @@ As checked on 2026-05-06, PaperMC reported Paper `26.1.2` build `60`, and Fabric
    ```
 
    Install the Java version required by the server version you create. Paper `26.1.2` currently requires Java 25; older `1.21.x` Paper builds usually require Java 21.
+   If Java 25 is installed somewhere other than `java` on PATH, set `JAVA_BINARY=/path/to/java` in `/opt/minecraft-vps-panel/.env`.
 
 4. Install Docker Engine using Docker's official Ubuntu instructions, then clone this repo into `/opt/minecraft-vps-panel`.
 

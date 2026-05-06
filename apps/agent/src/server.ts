@@ -139,6 +139,7 @@ const agentToken = process.env.AGENT_TOKEN ?? "";
 const dataDir = path.resolve(process.env.MC_PANEL_DATA_DIR ?? path.join(process.cwd(), ".data"));
 const serversDir = path.join(dataDir, "servers");
 const metadataFile = path.join(dataDir, "servers.json");
+const javaBinary = process.env.JAVA_BINARY ?? "java";
 const userAgent =
   process.env.MODRINTH_USER_AGENT ?? "z7i-minecraft-panel/0.2.0 (logeshms.cbe@gmail.com)";
 
@@ -652,7 +653,7 @@ async function startServer(id: string) {
   await updateServer(id, { status: "starting" });
   const root = serverPath(server);
   const child = spawn(
-    "/opt/jdk-25/bin/java",
+    javaBinary,
     [`-Xms${fixedMemoryMb}M`, `-Xmx${fixedMemoryMb}M`, "-jar", server.jarName, "nogui"],
     {
       cwd: root,
@@ -661,26 +662,6 @@ async function startServer(id: string) {
   );
 
   processes.set(id, child);
-  await appendLog(id, `Starting ${server.name} on port ${server.port}`);
-  await updateServer(id, { status: "running" });
-  setTimeout(() => {
-    if (processes.get(id) === child) {
-      restartAttempts.delete(id);
-    }
-  }, 120_000).unref();
-
-  child.stdout.on("data", (chunk: Buffer) => {
-    for (const line of chunk.toString("utf8").split(/\r?\n/).filter(Boolean)) {
-      void appendLog(id, line);
-    }
-  });
-
-  child.stderr.on("data", (chunk: Buffer) => {
-    for (const line of chunk.toString("utf8").split(/\r?\n/).filter(Boolean)) {
-      void appendLog(id, line);
-    }
-  });
-
   let handledExit = false;
   child.on("exit", (code) => {
     if (handledExit) {
@@ -701,6 +682,26 @@ async function startServer(id: string) {
     void appendLog(id, `Process failed to start: ${error.message}`);
     void handleProcessExit(id, 1);
   });
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString("utf8").split(/\r?\n/).filter(Boolean)) {
+      void appendLog(id, line);
+    }
+  });
+
+  child.stderr.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString("utf8").split(/\r?\n/).filter(Boolean)) {
+      void appendLog(id, line);
+    }
+  });
+
+  await appendLog(id, `Starting ${server.name} on port ${server.port}`);
+  await updateServer(id, { status: "running" });
+  setTimeout(() => {
+    if (processes.get(id) === child) {
+      restartAttempts.delete(id);
+    }
+  }, 120_000).unref();
 
   return getServer(id);
 }
@@ -837,7 +838,17 @@ async function streamServerArchive(id: string, response: ServerResponse) {
     response.destroy(error);
   });
 
-  const archiveDone = pipeline(zip.outputStream, response);
+  const archiveDone = new Promise<void>((resolve, reject) => {
+    zip.outputStream.on("error", reject);
+    response.on("error", reject);
+    response.on("finish", resolve);
+    response.on("close", () => {
+      if (!response.writableEnded) {
+        reject(new Error("Archive response closed before completion"));
+      }
+    });
+  });
+  zip.outputStream.pipe(response);
   await addDirectoryToZip(zip, root, root);
   zip.end();
   await archiveDone;
@@ -1412,6 +1423,11 @@ async function route(request: IncomingMessage, response: ServerResponse) {
 await ensureStorage();
 const server = http.createServer((request, response) => {
   route(request, response).catch((error: unknown) => {
+    if (response.headersSent) {
+      response.destroy(error instanceof Error ? error : undefined);
+      return;
+    }
+
     sendError(response, error);
   });
 });
