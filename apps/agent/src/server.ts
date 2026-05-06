@@ -834,17 +834,21 @@ async function streamServerArchive(id: string, response: ServerResponse) {
     "Cache-Control": "no-store",
   });
 
-  zip.on("error", (error) => {
+  zip.on("error", (error: any) => {
     response.destroy(error);
   });
 
   const archiveDone = new Promise<void>((resolve, reject) => {
+    let finished = false;
     zip.outputStream.on("error", reject);
     response.on("error", reject);
-    response.on("finish", resolve);
+    response.on("finish", () => {
+      finished = true;
+      resolve();
+    });
     response.on("close", () => {
-      if (!response.writableEnded) {
-        reject(new Error("Archive response closed before completion"));
+      if (!finished) {
+        resolve();
       }
     });
   });

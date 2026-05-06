@@ -1,3 +1,9 @@
+FROM node:22-bookworm-slim AS deps
+WORKDIR /app
+COPY package.json package-lock.json* ./
+COPY apps/web/package.json apps/web/package.json
+RUN npm install --workspace apps/web
+
 FROM deps AS build
 WORKDIR /app
 COPY tsconfig.base.json tsconfig.base.json
