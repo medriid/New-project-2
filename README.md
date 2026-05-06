@@ -10,6 +10,7 @@ A starter architecture for a DigitalOcean Ubuntu VPS that hosts:
 - Fabric server creation using Fabric's metadata API
 - Modrinth server-side mod installs into `mods/`
 - Modrinth Paper plugin installs into `plugins/`
+- one-click server folder ZIP export from the Files tab
 - cracked-mode player tracking, playerdata inventory viewing, last coordinates, heal, and kill actions
 
 ## Architecture
@@ -134,6 +135,25 @@ As checked on 2026-05-06, PaperMC reported Paper `26.1.2` build `60`, and Fabric
 
 - Paper plugins and Fabric mods are different ecosystems. Create a Paper server for plugins, or a Fabric server for mods.
 - The panel writes `online-mode=false` and `enforce-secure-profile=false` because this setup is intended for cracked mode.
+- Servers are marked `alwaysOn` by default. The systemd service keeps the Z7i agent running, and the agent auto-starts the Minecraft server on boot and restarts it after crashes with backoff. Pressing Stop in the panel disables always-on until Start or the settings toggle enables it again.
 - Offline player heal/kill works by editing `world/playerdata/*.dat` when the player is offline. Online actions use server commands.
 - CurseForge requires an API key and some files may not expose direct third-party downloads. Modrinth is the first-class source in this scaffold because its API exposes compatible version files and direct CDN URLs.
 - For a public production panel, keep the agent bound to `127.0.0.1`, use a long random `AGENT_TOKEN`, and keep SSH restricted.
+
+## Keeping It 24/7
+
+On the droplet, the chain should look like this:
+
+```bash
+sudo systemctl enable --now minecraft-panel-agent
+docker compose -f infra/docker-compose.yml up -d --build
+```
+
+Check it with:
+
+```bash
+sudo systemctl status minecraft-panel-agent
+docker compose -f infra/docker-compose.yml ps
+```
+
+The web containers restart through Docker Compose, the agent restarts through systemd, and the actual Minecraft Java process restarts through the agent's `alwaysOn` server flag.

@@ -8,6 +8,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { gzipSync } from "node:zlib";
 import * as nbt from "prismarine-nbt";
+import { ZipFile } from "yazl";
 
 type ServerStatus = "stopped" | "starting" | "running" | "stopping" | "crashed";
 type ServerSoftware = "fabric" | "paper";
@@ -38,6 +39,7 @@ type ServerRecord = {
   memoryMb: number;
   motd: MotdStyle;
   crackedMode: boolean;
+  alwaysOn: boolean;
   createdAt: string;
   updatedAt: string;
   relativePath: string;
@@ -163,6 +165,8 @@ type MinecraftColor = keyof typeof minecraftColors;
 
 const processes = new Map<string, ChildProcessWithoutNullStreams>();
 const subscribers = new Map<string, Set<ServerResponse>>();
+const intentionalStops = new Set<string>();
+const restartAttempts = new Map<string, number>();
 
 function now() {
   return new Date().toISOString();
@@ -251,6 +255,7 @@ function normalizeServer(server: Partial<ServerRecord> & { id: string; name: str
     memoryMb: fixedMemoryMb,
     motd: normalizeMotd(server.motd, server.name),
     crackedMode: server.crackedMode ?? true,
+    alwaysOn: server.alwaysOn ?? true,
     createdAt: server.createdAt ?? now(),
     updatedAt: server.updatedAt ?? now(),
     relativePath: server.relativePath ?? server.id,
@@ -534,6 +539,7 @@ async function createServer(body: {
       memoryMb: fixedMemoryMb,
       motd,
       crackedMode: true,
+      alwaysOn: true,
       createdAt: now(),
       updatedAt: now(),
       relativePath,
@@ -557,6 +563,7 @@ async function createServer(body: {
       memoryMb: fixedMemoryMb,
       motd,
       crackedMode: true,
+      alwaysOn: true,
       createdAt: now(),
       updatedAt: now(),
       relativePath,
@@ -570,6 +577,9 @@ async function createServer(body: {
 
   await writeServers([record]);
   await appendLog(id, `Created ${software} ${record.minecraftVersion} server with 6144 MB RAM`);
+  void startServer(id).catch((error: unknown) => {
+    void appendLog(id, `Initial always-on start failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  });
 
   return record;
 }
@@ -579,6 +589,7 @@ async function updateServerSettings(
   body: {
     name?: string;
     motd?: Partial<MotdStyle>;
+    alwaysOn?: boolean;
   },
 ) {
   const server = await getServer(id);
@@ -586,10 +597,16 @@ async function updateServerSettings(
   const next = await updateServer(id, {
     name: nextName,
     motd: normalizeMotd(body.motd ?? server.motd, nextName),
+    alwaysOn: body.alwaysOn ?? server.alwaysOn,
   });
 
   await writeServerProperties(next);
   await appendLog(id, `Updated server settings for ${next.name}`);
+
+  if (next.alwaysOn && !processes.has(id)) {
+    void startServer(id);
+  }
+
   return next;
 }
 
@@ -627,6 +644,11 @@ async function startServer(id: string) {
     return server;
   }
 
+  intentionalStops.delete(id);
+  if (!server.alwaysOn) {
+    await updateServer(id, { alwaysOn: true });
+  }
+
   await updateServer(id, { status: "starting" });
   const root = serverPath(server);
   const child = spawn(
@@ -641,6 +663,11 @@ async function startServer(id: string) {
   processes.set(id, child);
   await appendLog(id, `Starting ${server.name} on port ${server.port}`);
   await updateServer(id, { status: "running" });
+  setTimeout(() => {
+    if (processes.get(id) === child) {
+      restartAttempts.delete(id);
+    }
+  }, 120_000).unref();
 
   child.stdout.on("data", (chunk: Buffer) => {
     for (const line of chunk.toString("utf8").split(/\r?\n/).filter(Boolean)) {
@@ -654,22 +681,39 @@ async function startServer(id: string) {
     }
   });
 
+  let handledExit = false;
   child.on("exit", (code) => {
+    if (handledExit) {
+      return;
+    }
+    handledExit = true;
     processes.delete(id);
     void appendLog(id, `Process exited with code ${code ?? "unknown"}`);
-    void updateServer(id, { status: code === 0 ? "stopped" : "crashed" });
+    void handleProcessExit(id, code);
+  });
+
+  child.on("error", (error) => {
+    if (handledExit) {
+      return;
+    }
+    handledExit = true;
+    processes.delete(id);
+    void appendLog(id, `Process failed to start: ${error.message}`);
+    void handleProcessExit(id, 1);
   });
 
   return getServer(id);
 }
 
 async function stopServer(id: string) {
+  intentionalStops.add(id);
+  restartAttempts.delete(id);
   const child = processes.get(id);
   if (!child) {
-    return updateServer(id, { status: "stopped" });
+    return updateServer(id, { status: "stopped", alwaysOn: false });
   }
 
-  await updateServer(id, { status: "stopping" });
+  await updateServer(id, { status: "stopping", alwaysOn: false });
   child.stdin.write("stop\n");
   setTimeout(() => {
     if (processes.has(id)) {
@@ -678,6 +722,40 @@ async function stopServer(id: string) {
   }, 20_000).unref();
 
   return getServer(id);
+}
+
+async function handleProcessExit(id: string, code: number | null) {
+  const server = await getServer(id).catch(() => null);
+  if (!server) {
+    return;
+  }
+
+  if (intentionalStops.has(id) || !server.alwaysOn) {
+    intentionalStops.delete(id);
+    await updateServer(id, { status: "stopped", alwaysOn: false });
+    return;
+  }
+
+  const attempt = (restartAttempts.get(id) ?? 0) + 1;
+  restartAttempts.set(id, attempt);
+  const delayMs = Math.min(300_000, 15_000 * 2 ** Math.min(attempt - 1, 5));
+  await updateServer(id, { status: code === 0 ? "stopped" : "crashed" });
+  await appendLog(id, `Always-on restart scheduled in ${Math.round(delayMs / 1000)} seconds`);
+
+  setTimeout(() => {
+    void startServer(id).catch((error: unknown) => {
+      void appendLog(id, `Always-on restart failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    });
+  }, delayMs).unref();
+}
+
+async function startAlwaysOnServers() {
+  const servers = await readServers();
+  for (const server of servers.filter((item) => item.alwaysOn)) {
+    void startServer(server.id).catch((error: unknown) => {
+      void appendLog(server.id, `Always-on boot start failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    });
+  }
 }
 
 async function sendCommand(id: string, command: string) {
@@ -722,6 +800,47 @@ async function listFiles(id: string, requestedPath: string) {
       a.type === b.type ? a.name.localeCompare(b.name) : a.type === "directory" ? -1 : 1,
     ),
   };
+}
+
+async function addDirectoryToZip(zip: ZipFile, root: string, directory: string) {
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const absolute = path.join(directory, entry.name);
+    const relative = path.relative(root, absolute).replaceAll(path.sep, "/");
+
+    if (entry.isDirectory()) {
+      zip.addEmptyDirectory(relative);
+      await addDirectoryToZip(zip, root, absolute);
+      continue;
+    }
+
+    if (entry.isFile()) {
+      zip.addFile(absolute, relative);
+    }
+  }
+}
+
+async function streamServerArchive(id: string, response: ServerResponse) {
+  const server = await getServer(id);
+  const root = serverPath(server);
+  const zip = new ZipFile();
+  const filename = `${slugify(server.name)}-${new Date().toISOString().slice(0, 10)}.zip`;
+
+  response.writeHead(200, {
+    "Content-Type": "application/zip",
+    "Content-Disposition": `attachment; filename="${filename}"`,
+    "Cache-Control": "no-store",
+  });
+
+  zip.outputStream.pipe(response);
+  zip.on("error", (error) => {
+    response.destroy(error);
+  });
+
+  await addDirectoryToZip(zip, root, root);
+  zip.end();
+  await appendLog(id, `Exported server files as ${filename}`);
 }
 
 async function readFile(id: string, requestedPath: string) {
@@ -1258,6 +1377,11 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     return;
   }
 
+  if (action === "archive" && request.method === "GET") {
+    await streamServerArchive(id, response);
+    return;
+  }
+
   if (action === "file" && request.method === "GET") {
     sendJson(response, 200, await readFile(id, url.searchParams.get("path") ?? "server.properties"));
     return;
@@ -1293,4 +1417,5 @@ const server = http.createServer((request, response) => {
 
 server.listen(port, host, () => {
   console.log(`Z7i Minecraft agent listening on http://${host}:${port}`);
+  void startAlwaysOnServers();
 });

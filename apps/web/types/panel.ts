@@ -59,6 +59,7 @@ export type ServerRecord = {
   memoryMb: number;
   motd: MotdStyle;
   crackedMode: boolean;
+  alwaysOn: boolean;
   createdAt: string;
   updatedAt: string;
   relativePath: string;

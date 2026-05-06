@@ -170,6 +170,7 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
 
   const [settingsName, setSettingsName] = useState("Z7i Minecraft");
   const [settingsMotd, setSettingsMotd] = useState<MotdStyle>(defaultMotd);
+  const [settingsAlwaysOn, setSettingsAlwaysOn] = useState(true);
 
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedId) ?? servers[0] ?? null,
@@ -224,6 +225,7 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
 
     setSettingsName(selectedServer.name);
     setSettingsMotd(selectedServer.motd ?? defaultMotd);
+    setSettingsAlwaysOn(selectedServer.alwaysOn);
     setLogLines([]);
     const source = new EventSource(`/api/servers/${selectedServer.id}/logs/stream`);
     source.onmessage = (event) => {
@@ -343,6 +345,14 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
     }, "File saved");
   }
 
+  function downloadServerZip() {
+    if (!selectedServer || !isOwner) {
+      return;
+    }
+
+    window.location.href = `/api/servers/${selectedServer.id}/archive`;
+  }
+
   async function searchAddons(event?: FormEvent) {
     event?.preventDefault();
     if (!selectedServer) {
@@ -428,7 +438,7 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
     await runTask(async () => {
       const updated = await requestJson<ServerRecord>(`/api/servers/${selectedServer.id}/settings`, {
         method: "PATCH",
-        body: JSON.stringify({ name: settingsName, motd: settingsMotd }),
+        body: JSON.stringify({ name: settingsName, motd: settingsMotd, alwaysOn: settingsAlwaysOn }),
       });
       setServers((current) => current.map((server) => (server.id === updated.id ? updated : server)));
     }, "Settings saved");
@@ -566,8 +576,8 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
                   <strong>{selectedServer.crackedMode ? "Cracked" : "Premium"}</strong>
                 </div>
                 <div>
-                  <span>Owner</span>
-                  <strong>{ownerEmail}</strong>
+                  <span>Always on</span>
+                  <strong>{selectedServer.alwaysOn ? "Enabled" : "Disabled"}</strong>
                 </div>
               </div>
             </div>
@@ -612,6 +622,10 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
                     <button className="tool-button" onClick={() => void saveFile()}>
                       <Save size={17} />
                       <span>Save</span>
+                    </button>
+                    <button className="tool-button" onClick={downloadServerZip} type="button">
+                      <Download size={17} />
+                      <span>ZIP</span>
                     </button>
                   </div>
                   <div className="file-layout">
@@ -791,6 +805,7 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
                     <Toggle label="Strike" value={settingsMotd.strikethrough} onChange={(value) => setSettingsMotd((current) => ({ ...current, strikethrough: value }))} />
                     <Toggle label="Magic" value={settingsMotd.obfuscated} onChange={(value) => setSettingsMotd((current) => ({ ...current, obfuscated: value }))} />
                   </div>
+                  <Toggle label="Keep server online 24/7" value={settingsAlwaysOn} onChange={setSettingsAlwaysOn} />
                   <div className={`motd-preview mc-${settingsMotd.color} ${settingsMotd.bold ? "bold" : ""} ${settingsMotd.italic ? "italic" : ""} ${settingsMotd.underline ? "underline" : ""} ${settingsMotd.strikethrough ? "strike" : ""}`}>
                     {settingsMotd.text}
                   </div>
