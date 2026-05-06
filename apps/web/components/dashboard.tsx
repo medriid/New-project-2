@@ -132,9 +132,10 @@ function coordinateLine(player: PlayerRecord | PlayerDetail | null) {
 }
 
 function StatusDot({ status }: { status: ServerRecord["status"] }) {
+  const isOnline = status === "running" || status === "starting";
   return (
-    <span className={`status-dot ${status}`}>
-      <Circle size={10} fill="currentColor" />
+    <span className={`status-dot ${isOnline ? "online" : "offline"}`}>
+      <Circle size={10} fill={isOnline ? "#22c55e" : "#ef4444"} />
       {status}
     </span>
   );
@@ -524,11 +525,19 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
             </button>
             {isOwner && selectedServer ? (
               <>
-                <button className="tool-button" onClick={() => void serverAction("start")} disabled={busy}>
+                <button
+                  className="tool-button"
+                  onClick={() => void serverAction("start")}
+                  disabled={busy || selectedServer.status === "running" || selectedServer.status === "starting"}
+                >
                   <Play size={17} />
                   <span>Start</span>
                 </button>
-                <button className="tool-button" onClick={() => void serverAction("stop")} disabled={busy}>
+                <button
+                  className="tool-button"
+                  onClick={() => void serverAction("stop")}
+                  disabled={busy || selectedServer.status === "stopped"}
+                >
                   <Square size={17} />
                   <span>Stop</span>
                 </button>

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -138,6 +138,7 @@ const port = Number(process.env.AGENT_PORT ?? "8787");
 const agentToken = process.env.AGENT_TOKEN ?? "";
 const dataDir = path.resolve(process.env.MC_PANEL_DATA_DIR ?? path.join(process.cwd(), ".data"));
 const serversDir = path.join(dataDir, "servers");
+const archivesDir = path.join(dataDir, "archives");
 const metadataFile = path.join(dataDir, "servers.json");
 const javaBinary = process.env.JAVA_BINARY ?? "java";
 const userAgent =
@@ -232,6 +233,7 @@ function escapePropertiesValue(value: string) {
 
 async function ensureStorage() {
   await fs.mkdir(serversDir, { recursive: true });
+  await fs.mkdir(archivesDir, { recursive: true });
   try {
     await fs.access(metadataFile);
   } catch {
@@ -827,36 +829,28 @@ async function streamServerArchive(id: string, response: ServerResponse) {
   const root = serverPath(server);
   const zip = new ZipFile();
   const filename = `${slugify(server.name)}-${new Date().toISOString().slice(0, 10)}.zip`;
+  const archivePath = path.join(archivesDir, `${server.id}-${Date.now()}.zip`);
+
+  await fs.mkdir(archivesDir, { recursive: true });
+  const archiveDone = pipeline(zip.outputStream, createWriteStream(archivePath));
+  await addDirectoryToZip(zip, root, root);
+  zip.end();
+  await archiveDone;
+  const stats = await fs.stat(archivePath);
 
   response.writeHead(200, {
     "Content-Type": "application/zip",
     "Content-Disposition": `attachment; filename="${filename}"`,
+    "Content-Length": String(stats.size),
     "Cache-Control": "no-store",
   });
 
-  zip.on("error", (error: any) => {
-    response.destroy(error);
-  });
-
-  const archiveDone = new Promise<void>((resolve, reject) => {
-    let finished = false;
-    zip.outputStream.on("error", reject);
-    response.on("error", reject);
-    response.on("finish", () => {
-      finished = true;
-      resolve();
-    });
-    response.on("close", () => {
-      if (!finished) {
-        resolve();
-      }
-    });
-  });
-  zip.outputStream.pipe(response);
-  await addDirectoryToZip(zip, root, root);
-  zip.end();
-  await archiveDone;
-  await appendLog(id, `Exported server files as ${filename}`);
+  try {
+    await pipeline(createReadStream(archivePath), response);
+    await appendLog(id, `Exported server files as ${filename}`);
+  } finally {
+    await fs.unlink(archivePath).catch(() => undefined);
+  }
 }
 
 async function readFile(id: string, requestedPath: string) {
@@ -1140,9 +1134,9 @@ async function readPlayerDat(server: ServerRecord, player: PlayerRecord): Promis
   return {
     ...player,
     playerDataPath: path.relative(serverPath(server), file).replaceAll(path.sep, "/"),
-    health: typeof data.Health === "number" ? data.Health : null,
-    foodLevel: typeof data.foodLevel === "number" ? data.foodLevel : null,
-    xpLevel: typeof data.XpLevel === "number" ? data.XpLevel : null,
+    health: typeof data.Health !== "undefined" ? Number(data.Health) : null,
+    foodLevel: typeof data.foodLevel !== "undefined" ? Number(data.foodLevel) : null,
+    xpLevel: typeof data.XpLevel !== "undefined" ? Number(data.XpLevel) : null,
     lastCoordinates:
       pos && pos.length >= 3
         ? {
