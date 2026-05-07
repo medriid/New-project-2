@@ -10,7 +10,10 @@ A starter architecture for a DigitalOcean Ubuntu VPS that hosts:
 - Fabric server creation using Fabric's metadata API
 - Modrinth server-side mod installs into `mods/`
 - Modrinth Paper plugin installs into `plugins/`
+- Modrinth datapack installs into the active world's `datapacks/`
+- owner-only file uploads and hover-delete in the Files tab
 - one-click server folder ZIP export from the Files tab
+- Google Drive OAuth backups every 10 hours, plus manual backup from Settings
 - cracked-mode player tracking, playerdata inventory viewing, last coordinates, heal, and kill actions
 
 ## Architecture
@@ -26,9 +29,12 @@ flowchart LR
   Agent --> Paper["PaperMC Fill API"]
   Agent --> Fabric["Fabric Meta API"]
   Agent --> Modrinth["Modrinth API/CDN"]
+  Agent --> Drive["Google Drive API"]
 ```
 
 The important security boundary is that the browser never talks to the agent directly. The web app verifies the Supabase user, checks whether the email is `OWNER_EMAIL`, and then proxies privileged actions to the local agent with `AGENT_TOKEN`.
+
+Google Drive refresh tokens are encrypted by the agent and stored in `MC_PANEL_DATA_DIR/google-drive.json`. Set a long `AGENT_SECRET`; if it is missing, the agent falls back to `AGENT_TOKEN` for encryption.
 
 ## Version Sources
 
@@ -62,13 +68,22 @@ As checked on 2026-05-06, PaperMC reported Paper `26.1.2` build `60`, and Fabric
    https://your-domain.com/auth/callback
    ```
 
-4. Start the local agent:
+4. To enable Google Drive backups, create a Google OAuth web client with the Drive API enabled and add this redirect URL:
+
+   ```text
+   http://localhost:3000/api/google-drive/callback
+   https://your-domain.com/api/google-drive/callback
+   ```
+
+   Set `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_DRIVE_CLIENT_SECRET`, and `AGENT_SECRET` in your environment. The panel uses the `drive.file` scope so it can create backup ZIPs through files it owns.
+
+5. Start the local agent:
 
    ```bash
    AGENT_TOKEN=dev-token npm run dev:agent
    ```
 
-5. Start the web app:
+6. Start the web app:
 
    ```bash
    AGENT_TOKEN=dev-token npm run dev:web
@@ -95,6 +110,8 @@ As checked on 2026-05-06, PaperMC reported Paper `26.1.2` build `60`, and Fabric
 4. Install Docker Engine using Docker's official Ubuntu instructions, then clone this repo into `/opt/minecraft-vps-panel`.
 
 5. Create `/opt/minecraft-vps-panel/.env` from `.env.example`, set your Supabase keys, owner email, domain, and a long `AGENT_TOKEN`.
+
+   If you use `supabase/schema.sql`, update `public.panel_settings.owner_email` to match `OWNER_EMAIL`; row-level security policies use it to restrict audit/settings reads.
 
 6. Install dependencies and build the agent:
 

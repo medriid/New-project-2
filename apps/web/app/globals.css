@@ -234,6 +234,21 @@ h2 {
   white-space: nowrap;
 }
 
+.upload-control {
+  position: relative;
+  cursor: pointer;
+}
+
+.upload-control input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  min-height: 100%;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
 .icon-button {
   width: 38px;
   height: 38px;
@@ -314,6 +329,7 @@ h2 {
 .server-button.active,
 .nav-stack button.active,
 .file-list button:hover,
+.file-row:hover .file-open,
 .player-list button:hover,
 .player-list button.active,
 .tool-button:hover,
@@ -557,6 +573,41 @@ select:focus {
   gap: 6px;
 }
 
+.file-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  gap: 6px;
+}
+
+.file-row .file-open {
+  min-width: 0;
+}
+
+.file-delete {
+  width: 36px;
+  min-height: 42px;
+  display: grid !important;
+  place-items: center;
+  padding: 0 !important;
+  color: var(--muted);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.file-row:hover .file-delete,
+.file-row:focus-within .file-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.file-delete:hover,
+.danger-button:hover {
+  border-color: #6f2424;
+  background: #241010;
+  color: #ffd4d4;
+}
+
 .file-list button small {
   color: var(--faint);
   margin-left: auto;
@@ -675,7 +726,7 @@ select:focus {
 
 .player-grid {
   height: auto;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .player-actions {
@@ -752,6 +803,31 @@ select:focus {
   width: 16px;
   min-height: 16px;
   accent-color: var(--text);
+}
+
+.backup-panel {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #070707;
+}
+
+.backup-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.backup-grid label {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.86rem;
 }
 
 .motd-preview {
@@ -907,7 +983,8 @@ select:focus {
   .player-grid,
   .detail-table,
   .create-grid,
-  .toggle-grid {
+  .toggle-grid,
+  .backup-grid {
     grid-template-columns: 1fr;
   }
 

@@ -24,3 +24,18 @@ export function getSupabaseEnv() {
 
   return { url, key };
 }
+
+export function hasGoogleDriveEnv() {
+  return Boolean(process.env.GOOGLE_DRIVE_CLIENT_ID && process.env.GOOGLE_DRIVE_CLIENT_SECRET);
+}
+
+export function getGoogleDriveEnv() {
+  const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_DRIVE_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    throw new Error("Google Drive OAuth environment variables are not configured");
+  }
+
+  return { clientId, clientSecret };
+}

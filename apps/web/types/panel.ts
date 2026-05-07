@@ -1,6 +1,6 @@
 export type ServerStatus = "stopped" | "starting" | "running" | "stopping" | "crashed";
 export type ServerSoftware = "fabric" | "paper";
-export type AddonKind = "mod" | "plugin";
+export type AddonKind = "mod" | "plugin" | "datapack";
 export type MinecraftColor =
   | "black"
   | "dark_blue"
@@ -125,4 +125,16 @@ export type PlayerSummary = {
   operators: unknown[];
   whitelist: unknown[];
   bannedPlayers: unknown[];
+};
+
+export type DriveBackupStatus = {
+  credentialsConfigured: boolean;
+  connected: boolean;
+  folderId: string | null;
+  intervalHours: number;
+  lastBackupAt: string | null;
+  lastBackupFileId: string | null;
+  lastBackupFileName: string | null;
+  lastError: string | null;
+  inProgress: boolean;
 };

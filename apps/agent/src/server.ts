@@ -12,7 +12,7 @@ import { ZipFile } from "yazl";
 
 type ServerStatus = "stopped" | "starting" | "running" | "stopping" | "crashed";
 type ServerSoftware = "fabric" | "paper";
-type AddonKind = "mod" | "plugin";
+type AddonKind = "mod" | "plugin" | "datapack";
 type PlayerAction = "heal" | "kill";
 
 type MotdStyle = {
@@ -109,6 +109,20 @@ type InventoryItem = {
   customName?: string;
 };
 
+type GoogleDriveConfig = {
+  refreshToken: string;
+  folderId: string | null;
+  connectedAt: string;
+  lastBackupAt: string | null;
+  lastBackupFileId: string | null;
+  lastBackupFileName: string | null;
+  lastError: string | null;
+};
+
+type StoredGoogleDriveConfig = Omit<GoogleDriveConfig, "refreshToken"> & {
+  refreshTokenEncrypted: string;
+};
+
 type PaperProject = {
   versions: Record<string, string[]>;
 };
@@ -139,8 +153,21 @@ const agentToken = process.env.AGENT_TOKEN ?? "";
 const dataDir = path.resolve(process.env.MC_PANEL_DATA_DIR ?? path.join(process.cwd(), ".data"));
 const serversDir = path.join(dataDir, "servers");
 const archivesDir = path.join(dataDir, "archives");
+const backupsDir = path.join(dataDir, "backups");
 const metadataFile = path.join(dataDir, "servers.json");
+const driveConfigFile = path.join(dataDir, "google-drive.json");
 const javaBinary = process.env.JAVA_BINARY ?? "java";
+const parsedMaxUploadMb = Number(process.env.MAX_PANEL_UPLOAD_MB ?? "100");
+const maxUploadBytes = (Number.isFinite(parsedMaxUploadMb) && parsedMaxUploadMb > 0 ? parsedMaxUploadMb : 100) * 1024 * 1024;
+const parsedDriveBackupIntervalHours = Number(process.env.GOOGLE_DRIVE_BACKUP_INTERVAL_HOURS ?? "10");
+const driveBackupIntervalHours =
+  Number.isFinite(parsedDriveBackupIntervalHours) && parsedDriveBackupIntervalHours > 0
+    ? parsedDriveBackupIntervalHours
+    : 10;
+const driveBackupIntervalMs = driveBackupIntervalHours * 60 * 60 * 1000;
+const googleDriveClientId = process.env.GOOGLE_DRIVE_CLIENT_ID ?? "";
+const googleDriveClientSecret = process.env.GOOGLE_DRIVE_CLIENT_SECRET ?? "";
+const tokenSecret = process.env.AGENT_SECRET || agentToken;
 const userAgent =
   process.env.MODRINTH_USER_AGENT ?? "z7i-minecraft-panel/0.2.0 (logeshms.cbe@gmail.com)";
 
@@ -169,6 +196,8 @@ const processes = new Map<string, ChildProcessWithoutNullStreams>();
 const subscribers = new Map<string, Set<ServerResponse>>();
 const intentionalStops = new Set<string>();
 const restartAttempts = new Map<string, number>();
+let driveBackupTimer: NodeJS.Timeout | null = null;
+let driveBackupInProgress = false;
 
 function now() {
   return new Date().toISOString();
@@ -234,6 +263,7 @@ function escapePropertiesValue(value: string) {
 async function ensureStorage() {
   await fs.mkdir(serversDir, { recursive: true });
   await fs.mkdir(archivesDir, { recursive: true });
+  await fs.mkdir(backupsDir, { recursive: true });
   try {
     await fs.access(metadataFile);
   } catch {
@@ -335,10 +365,48 @@ function safeResolve(root: string, requestedPath = ".") {
   return resolvedTarget;
 }
 
-async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
+function encryptionKey() {
+  if (!tokenSecret) {
+    throw Object.assign(new Error("AGENT_SECRET or AGENT_TOKEN is required before connecting Google Drive"), {
+      statusCode: 500,
+    });
+  }
+
+  return crypto.createHash("sha256").update(tokenSecret, "utf8").digest();
+}
+
+function encryptSecret(value: string) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString("base64url")}.${tag.toString("base64url")}.${encrypted.toString("base64url")}`;
+}
+
+function decryptSecret(value: string) {
+  const [ivValue, tagValue, encryptedValue] = value.split(".");
+  if (!ivValue || !tagValue || !encryptedValue) {
+    throw Object.assign(new Error("Stored Google Drive token is unreadable"), { statusCode: 500 });
+  }
+
+  const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(ivValue, "base64url"));
+  decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(encryptedValue, "base64url")),
+    decipher.final(),
+  ]).toString("utf8");
+}
+
+async function readJsonBody<T>(request: IncomingMessage, limitBytes = 2 * maxUploadBytes): Promise<T> {
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.byteLength;
+    if (total > limitBytes) {
+      throw Object.assign(new Error("Request body is too large"), { statusCode: 413 });
+    }
+    chunks.push(buffer);
   }
 
   const raw = Buffer.concat(chunks).toString("utf8");
@@ -824,24 +892,31 @@ async function addDirectoryToZip(zip: ZipFile, root: string, directory: string) 
   }
 }
 
-async function streamServerArchive(id: string, response: ServerResponse) {
-  const server = await getServer(id);
+async function createServerArchiveFile(server: ServerRecord) {
   const root = serverPath(server);
   const zip = new ZipFile();
-  const filename = `${slugify(server.name)}-${new Date().toISOString().slice(0, 10)}.zip`;
-  const archivePath = path.join(archivesDir, `${server.id}-${Date.now()}.zip`);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const filename = `${slugify(server.name)}-${stamp}.zip`;
+  const archivePath = path.join(backupsDir, `${server.id}-${stamp}.zip`);
 
-  await fs.mkdir(archivesDir, { recursive: true });
+  await fs.mkdir(backupsDir, { recursive: true });
   const archiveDone = pipeline(zip.outputStream, createWriteStream(archivePath));
   await addDirectoryToZip(zip, root, root);
   zip.end();
   await archiveDone;
   const stats = await fs.stat(archivePath);
 
+  return { archivePath, filename, size: stats.size };
+}
+
+async function streamServerArchive(id: string, response: ServerResponse) {
+  const server = await getServer(id);
+  const { archivePath, filename, size } = await createServerArchiveFile(server);
+
   response.writeHead(200, {
     "Content-Type": "application/zip",
     "Content-Disposition": `attachment; filename="${filename}"`,
-    "Content-Length": String(stats.size),
+    "Content-Length": String(size),
     "Cache-Control": "no-store",
   });
 
@@ -887,27 +962,108 @@ async function writeTextFile(id: string, requestedPath: string, content: string)
   return { ok: true };
 }
 
-function safeFilename(filename: string) {
-  return filename.replace(/[^a-zA-Z0-9._+ -]/g, "_").slice(0, 160);
+async function deleteFile(id: string, requestedPath: string) {
+  const server = await getServer(id);
+  const root = serverPath(server);
+  const target = safeResolve(root, requestedPath);
+  const stats = await fs.stat(target);
+
+  if (target === root || !stats.isFile()) {
+    throw Object.assign(new Error("Only files can be deleted from the panel"), { statusCode: 400 });
+  }
+
+  await fs.unlink(target);
+  await appendLog(id, `Deleted file ${path.relative(root, target).replaceAll(path.sep, "/")}`);
+  return { ok: true };
 }
 
-function addonConfig(server: ServerRecord, kind: AddonKind) {
+async function uploadFile(
+  id: string,
+  body: {
+    path?: string;
+    filename?: string;
+    contentBase64?: string;
+    kind?: AddonKind;
+  },
+) {
+  const server = await getServer(id);
+  const root = serverPath(server);
+  const filename = safeFilename(String(body.filename ?? ""));
+  const content = Buffer.from(String(body.contentBase64 ?? ""), "base64");
+
+  if (!filename || filename === "upload.bin") {
+    throw Object.assign(new Error("Upload filename is required"), { statusCode: 400 });
+  }
+
+  if (content.byteLength === 0 || content.byteLength > maxUploadBytes) {
+    throw Object.assign(new Error(`Uploads must be between 1 byte and ${Math.round(maxUploadBytes / 1024 / 1024)} MB`), {
+      statusCode: 413,
+    });
+  }
+
+  let targetDirectory: string;
+  if (body.kind) {
+    const config = await addonConfig(server, body.kind);
+    if (!hasExtension(filename, config.extensions)) {
+      throw Object.assign(new Error(`${body.kind} uploads must use ${config.extensions.join(" or ")}`), {
+        statusCode: 400,
+      });
+    }
+    targetDirectory = safeResolve(root, config.folder);
+  } else {
+    targetDirectory = safeResolve(root, String(body.path ?? "."));
+  }
+
+  await fs.mkdir(targetDirectory, { recursive: true });
+  const target = safeResolve(targetDirectory, filename);
+  await fs.writeFile(target, content);
+  const relative = path.relative(root, target).replaceAll(path.sep, "/");
+  await appendLog(id, `Uploaded file ${relative}`);
+
+  return {
+    ok: true,
+    path: relative,
+    filename,
+    size: content.byteLength,
+    folder: path.relative(root, targetDirectory).replaceAll(path.sep, "/") || ".",
+  };
+}
+
+function safeFilename(filename: string) {
+  const clean = path.basename(filename).replace(/[^a-zA-Z0-9._+ -]/g, "_").slice(0, 160);
+  return clean && !/^\.+$/.test(clean) ? clean : "upload.bin";
+}
+
+function hasExtension(filename: string, extensions: string[]) {
+  const lower = filename.toLowerCase();
+  return extensions.some((extension) => lower.endsWith(extension));
+}
+
+async function addonConfig(server: ServerRecord, kind: AddonKind) {
   if (kind === "mod") {
     if (server.software !== "fabric") {
       throw Object.assign(new Error("Fabric mods can only be installed on a Fabric server"), { statusCode: 400 });
     }
-    return { folder: "mods", loaders: ["fabric"] };
+    return { folder: "mods", loaders: ["fabric"], extensions: [".jar"] };
+  }
+
+  if (kind === "datapack") {
+    return {
+      folder: `${await getLevelName(server)}/datapacks`,
+      loaders: ["datapack"],
+      extensions: [".zip"],
+    };
   }
 
   if (server.software !== "paper") {
     throw Object.assign(new Error("Paper plugins can only be installed on a Paper server"), { statusCode: 400 });
   }
-  return { folder: "plugins", loaders: ["paper", "spigot", "bukkit"] };
+  return { folder: "plugins", loaders: ["paper", "spigot", "bukkit"], extensions: [".jar"] };
 }
 
 async function installModrinth(id: string, projectId: string, kind: AddonKind) {
   const server = await getServer(id);
-  const config = addonConfig(server, kind);
+  const config = await addonConfig(server, kind);
   const query = new URLSearchParams({
     loaders: JSON.stringify(config.loaders),
     game_versions: JSON.stringify([server.minecraftVersion]),
@@ -924,17 +1080,20 @@ async function installModrinth(id: string, projectId: string, kind: AddonKind) {
   }
 
   const downloadUrl = new URL(file.url);
-  if (downloadUrl.hostname !== "cdn.modrinth.com" || !file.filename.endsWith(".jar")) {
+  if (downloadUrl.hostname !== "cdn.modrinth.com" || !hasExtension(file.filename, config.extensions)) {
     throw Object.assign(new Error("Unsupported Modrinth download target"), { statusCode: 400 });
   }
 
   const destination = path.join(serverPath(server), config.folder, safeFilename(file.filename));
+  await fs.mkdir(path.dirname(destination), { recursive: true });
   await downloadFile(file.url, destination);
   await appendLog(id, `Installed ${kind} ${file.filename}`);
 
   return {
     ok: true,
     kind,
+    folder: config.folder,
+    path: path.relative(serverPath(server), destination).replaceAll(path.sep, "/"),
     version: version.version_number,
     filename: file.filename,
     size: file.size,
@@ -1021,7 +1180,7 @@ function upsertPlayer(records: PlayerRecord[], name: string, patch: Partial<Play
 }
 
 function parseCoordinates(input: string): PlayerCoordinates | null {
-  const match = input.match(/\[([^\]]+)\](-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
+  const match = input.match(/\[([^\]]+)\]\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
   if (!match?.[1] || !match[2] || !match[3] || !match[4]) {
     return null;
   }
@@ -1082,6 +1241,24 @@ async function playerDataDirectory(server: ServerRecord) {
   return path.join(serverPath(server), await getLevelName(server), "playerdata");
 }
 
+async function resolvePlayerDataFile(server: ServerRecord, player: PlayerRecord) {
+  const root = serverPath(server);
+  const playerdata = await playerDataDirectory(server);
+  const candidates = [
+    player.playerDataPath ? safeResolve(root, player.playerDataPath) : null,
+    path.join(playerdata, `${player.uuid}.dat`),
+    path.join(playerdata, `${offlineUuid(player.name)}.dat`),
+  ].filter((candidate): candidate is string => Boolean(candidate));
+
+  for (const candidate of Array.from(new Set(candidates))) {
+    if ((await fs.stat(candidate).catch(() => null))?.isFile()) {
+      return candidate;
+    }
+  }
+
+  throw Object.assign(new Error("Playerdata file is not available yet"), { statusCode: 404 });
+}
+
 async function syncPlayersFromDisk(server: ServerRecord) {
   const records = await readPlayersIndex(server);
   if (records.length === 0) {
@@ -1102,9 +1279,15 @@ async function syncPlayersFromDisk(server: ServerRecord) {
   const files = await fs.readdir(playerdata).catch(() => [] as string[]);
   for (const filename of files.filter((item) => item.endsWith(".dat"))) {
     const uuid = filename.replace(/\.dat$/, "").toLowerCase();
-    const existing = records.find((record) => record.uuid === uuid);
+    const existing = records.find(
+      (record) =>
+        record.uuid === uuid ||
+        offlineUuid(record.name) === uuid ||
+        record.playerDataPath?.replaceAll("\\", "/").endsWith(`/${filename}`),
+    );
+    const relativePath = path.relative(serverPath(server), path.join(playerdata, filename)).replaceAll(path.sep, "/");
     if (existing) {
-      existing.playerDataPath = path.relative(serverPath(server), path.join(playerdata, filename)).replaceAll(path.sep, "/");
+      existing.playerDataPath = relativePath;
       const detail = await readPlayerDat(server, existing).catch(() => null);
       if (detail?.lastCoordinates) {
         existing.lastCoordinates = detail.lastCoordinates;
@@ -1113,7 +1296,7 @@ async function syncPlayersFromDisk(server: ServerRecord) {
       const name = uuid.slice(0, 8);
       records.push({
         ...createPlayer(name, uuid),
-        playerDataPath: path.relative(serverPath(server), path.join(playerdata, filename)).replaceAll(path.sep, "/"),
+        playerDataPath: relativePath,
       });
     }
   }
@@ -1123,13 +1306,16 @@ async function syncPlayersFromDisk(server: ServerRecord) {
 }
 
 async function readPlayerDat(server: ServerRecord, player: PlayerRecord): Promise<PlayerDetail> {
-  const playerdata = await playerDataDirectory(server);
-  const file = path.join(playerdata, `${player.uuid}.dat`);
+  const file = await resolvePlayerDataFile(server, player);
   const raw = await fs.readFile(file);
   const parsed = await nbt.parse(raw);
   const data = nbt.simplify(parsed.parsed) as Record<string, unknown>;
   const pos = Array.isArray(data.Pos) ? data.Pos.map(Number) : null;
-  const inventory = Array.isArray(data.Inventory) ? data.Inventory : [];
+  const inventory = Array.isArray(data.Inventory)
+    ? data.Inventory
+    : Array.isArray(data.inventory)
+      ? data.inventory
+      : [];
 
   return {
     ...player,
@@ -1211,8 +1397,7 @@ function safePlayerName(name: string) {
 }
 
 async function mutatePlayerDat(server: ServerRecord, player: PlayerRecord, action: PlayerAction) {
-  const playerdata = await playerDataDirectory(server);
-  const file = path.join(playerdata, `${player.uuid}.dat`);
+  const file = await resolvePlayerDataFile(server, player);
   const raw = await fs.readFile(file);
   const parsed = await nbt.parse(raw);
   const root = parsed.parsed.value as Record<string, nbt.Tags[nbt.TagType] | undefined>;
@@ -1250,6 +1435,262 @@ async function playerAction(id: string, key: string, action: PlayerAction) {
 
   await appendLog(id, `${action === "heal" ? "Healed" : "Killed"} ${player.name} from panel`);
   return { ok: true, player: await getPlayer(id, player.uuid) };
+}
+
+function googleDriveCredentialsConfigured() {
+  return Boolean(googleDriveClientId && googleDriveClientSecret);
+}
+
+async function readGoogleDriveConfig(): Promise<GoogleDriveConfig | null> {
+  const raw = await fs.readFile(driveConfigFile, "utf8").catch(() => null);
+  if (!raw) {
+    return null;
+  }
+
+  const stored = JSON.parse(raw) as StoredGoogleDriveConfig;
+  return {
+    refreshToken: decryptSecret(stored.refreshTokenEncrypted),
+    folderId: stored.folderId ?? null,
+    connectedAt: stored.connectedAt,
+    lastBackupAt: stored.lastBackupAt ?? null,
+    lastBackupFileId: stored.lastBackupFileId ?? null,
+    lastBackupFileName: stored.lastBackupFileName ?? null,
+    lastError: stored.lastError ?? null,
+  };
+}
+
+async function writeGoogleDriveConfig(config: GoogleDriveConfig) {
+  const stored: StoredGoogleDriveConfig = {
+    refreshTokenEncrypted: encryptSecret(config.refreshToken),
+    folderId: config.folderId,
+    connectedAt: config.connectedAt,
+    lastBackupAt: config.lastBackupAt,
+    lastBackupFileId: config.lastBackupFileId,
+    lastBackupFileName: config.lastBackupFileName,
+    lastError: config.lastError,
+  };
+  await fs.writeFile(driveConfigFile, `${JSON.stringify(stored, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+async function getGoogleDriveStatus() {
+  const config = await readGoogleDriveConfig().catch(() => null);
+  return {
+    credentialsConfigured: googleDriveCredentialsConfigured(),
+    connected: Boolean(config),
+    folderId: config?.folderId ?? null,
+    intervalHours: driveBackupIntervalHours,
+    lastBackupAt: config?.lastBackupAt ?? null,
+    lastBackupFileId: config?.lastBackupFileId ?? null,
+    lastBackupFileName: config?.lastBackupFileName ?? null,
+    lastError: config?.lastError ?? null,
+    inProgress: driveBackupInProgress,
+  };
+}
+
+async function connectGoogleDrive(body: { refreshToken?: string; folderId?: string | null }) {
+  if (!googleDriveCredentialsConfigured()) {
+    throw Object.assign(new Error("Google Drive OAuth credentials are not configured"), { statusCode: 503 });
+  }
+
+  const refreshToken = String(body.refreshToken ?? "").trim();
+  if (!refreshToken) {
+    throw Object.assign(new Error("Google Drive refresh token is required"), { statusCode: 400 });
+  }
+
+  const current = await readGoogleDriveConfig().catch(() => null);
+  await writeGoogleDriveConfig({
+    refreshToken,
+    folderId: body.folderId ? String(body.folderId).trim() : null,
+    connectedAt: now(),
+    lastBackupAt: current?.lastBackupAt ?? null,
+    lastBackupFileId: current?.lastBackupFileId ?? null,
+    lastBackupFileName: current?.lastBackupFileName ?? null,
+    lastError: null,
+  });
+
+  return getGoogleDriveStatus();
+}
+
+async function disconnectGoogleDrive() {
+  await fs.unlink(driveConfigFile).catch(() => undefined);
+  return getGoogleDriveStatus();
+}
+
+async function refreshGoogleAccessToken(refreshToken: string) {
+  if (!googleDriveCredentialsConfigured()) {
+    throw Object.assign(new Error("Google Drive OAuth credentials are not configured"), { statusCode: 503 });
+  }
+
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      client_id: googleDriveClientId,
+      client_secret: googleDriveClientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    }),
+  });
+  const payload = (await response.json()) as {
+    access_token?: string;
+    error?: string;
+    error_description?: string;
+  };
+
+  if (!response.ok || !payload.access_token) {
+    throw new Error(payload.error_description ?? payload.error ?? "Google Drive token refresh failed");
+  }
+
+  return payload.access_token;
+}
+
+async function flushWorldForBackup(id: string) {
+  const child = processes.get(id);
+  if (!child) {
+    return;
+  }
+
+  child.stdin.write("save-all flush\n");
+  await appendLog(id, "Flushing world save before Google Drive backup");
+  await new Promise((resolve) => setTimeout(resolve, 5_000));
+}
+
+async function uploadArchiveToGoogleDrive(
+  accessToken: string,
+  archivePath: string,
+  filename: string,
+  folderId: string | null,
+) {
+  const stats = await fs.stat(archivePath);
+  const metadata: { name: string; mimeType: string; parents?: string[] } = {
+    name: filename,
+    mimeType: "application/zip",
+  };
+  if (folderId) {
+    metadata.parents = [folderId];
+  }
+
+  const session = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json; charset=UTF-8",
+      "X-Upload-Content-Type": "application/zip",
+      "X-Upload-Content-Length": String(stats.size),
+    },
+    body: JSON.stringify(metadata),
+  });
+
+  if (!session.ok) {
+    throw new Error(`Google Drive upload session failed: ${session.status}`);
+  }
+
+  const location = session.headers.get("location");
+  if (!location) {
+    throw new Error("Google Drive did not return an upload session");
+  }
+
+  const uploadInit = {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/zip",
+      "Content-Length": String(stats.size),
+      "Content-Range": `bytes 0-${stats.size - 1}/${stats.size}`,
+    },
+    body: createReadStream(archivePath) as unknown as RequestInit["body"],
+    duplex: "half",
+  } as RequestInit & { duplex: "half" };
+  const upload = await fetch(location, uploadInit);
+  const payload = (await upload.json()) as { id?: string; name?: string; error?: { message?: string } };
+
+  if (!upload.ok || !payload.id) {
+    throw new Error(payload.error?.message ?? `Google Drive upload failed: ${upload.status}`);
+  }
+
+  return { id: payload.id, name: payload.name ?? filename };
+}
+
+async function backupServerToGoogleDrive(id: string) {
+  if (driveBackupInProgress) {
+    throw Object.assign(new Error("A Google Drive backup is already running"), { statusCode: 409 });
+  }
+
+  const config = await readGoogleDriveConfig();
+  if (!config) {
+    throw Object.assign(new Error("Google Drive is not connected"), { statusCode: 400 });
+  }
+
+  const server = await getServer(id);
+  let archivePath: string | null = null;
+  driveBackupInProgress = true;
+
+  try {
+    await flushWorldForBackup(id);
+    const archive = await createServerArchiveFile(server);
+    archivePath = archive.archivePath;
+    const accessToken = await refreshGoogleAccessToken(config.refreshToken);
+    const uploaded = await uploadArchiveToGoogleDrive(accessToken, archive.archivePath, archive.filename, config.folderId);
+    const nextConfig = {
+      ...config,
+      lastBackupAt: now(),
+      lastBackupFileId: uploaded.id,
+      lastBackupFileName: uploaded.name,
+      lastError: null,
+    };
+    await writeGoogleDriveConfig(nextConfig);
+    await appendLog(id, `Backed up server to Google Drive as ${uploaded.name}`);
+    return { ok: true, fileId: uploaded.id, fileName: uploaded.name, status: await getGoogleDriveStatus() };
+  } catch (error) {
+    await writeGoogleDriveConfig({
+      ...config,
+      lastError: error instanceof Error ? error.message : "Google Drive backup failed",
+    });
+    await appendLog(id, `Google Drive backup failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    throw error;
+  } finally {
+    driveBackupInProgress = false;
+    if (archivePath) {
+      await fs.unlink(archivePath).catch(() => undefined);
+    }
+  }
+}
+
+async function runScheduledGoogleDriveBackup() {
+  if (driveBackupInProgress || !googleDriveCredentialsConfigured()) {
+    return;
+  }
+
+  const config = await readGoogleDriveConfig().catch(() => null);
+  if (!config) {
+    return;
+  }
+
+  if (config.lastBackupAt && Date.now() - Date.parse(config.lastBackupAt) < driveBackupIntervalMs) {
+    return;
+  }
+
+  const server = (await readServers())[0];
+  if (!server) {
+    return;
+  }
+
+  await backupServerToGoogleDrive(server.id).catch(() => undefined);
+}
+
+function startGoogleDriveBackupScheduler() {
+  if (driveBackupTimer) {
+    clearInterval(driveBackupTimer);
+  }
+
+  const checkIntervalMs = Math.min(driveBackupIntervalMs, 30 * 60 * 1000);
+  driveBackupTimer = setInterval(() => {
+    void runScheduledGoogleDriveBackup();
+  }, checkIntervalMs);
+  driveBackupTimer.unref();
+  void runScheduledGoogleDriveBackup();
 }
 
 async function streamLogs(id: string, response: ServerResponse) {
@@ -1298,6 +1739,25 @@ async function route(request: IncomingMessage, response: ServerResponse) {
 
   if (url.pathname === "/paper/latest") {
     sendJson(response, 200, await getPaperLatest());
+    return;
+  }
+
+  if (url.pathname === "/drive/status" && request.method === "GET") {
+    sendJson(response, 200, await getGoogleDriveStatus());
+    return;
+  }
+
+  if (url.pathname === "/drive/connect" && request.method === "POST") {
+    sendJson(
+      response,
+      200,
+      await connectGoogleDrive(await readJsonBody<{ refreshToken?: string; folderId?: string | null }>(request)),
+    );
+    return;
+  }
+
+  if (url.pathname === "/drive/disconnect" && request.method === "DELETE") {
+    sendJson(response, 200, await disconnectGoogleDrive());
     return;
   }
 
@@ -1403,15 +1863,38 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     return;
   }
 
+  if (action === "file" && request.method === "DELETE") {
+    const body = await readJsonBody<{ path?: string }>(request);
+    sendJson(response, 200, await deleteFile(id, String(body.path ?? "")));
+    return;
+  }
+
+  if (action === "upload" && request.method === "POST") {
+    sendJson(
+      response,
+      200,
+      await uploadFile(
+        id,
+        await readJsonBody<{ path?: string; filename?: string; contentBase64?: string; kind?: AddonKind }>(request),
+      ),
+    );
+    return;
+  }
+
   if (action === "addons/modrinth" && request.method === "POST") {
     const body = await readJsonBody<{ projectId?: string; kind?: AddonKind }>(request);
-    const kind = body.kind === "mod" ? "mod" : "plugin";
+    const kind: AddonKind = body.kind === "mod" || body.kind === "datapack" ? body.kind : "plugin";
     sendJson(response, 200, await installModrinth(id, String(body.projectId ?? ""), kind));
     return;
   }
 
   if (action === "players" && request.method === "GET") {
     sendJson(response, 200, await getPlayers(id));
+    return;
+  }
+
+  if (action === "drive/backup" && request.method === "POST") {
+    sendJson(response, 200, await backupServerToGoogleDrive(id));
     return;
   }
 
@@ -1433,4 +1916,5 @@ const server = http.createServer((request, response) => {
 server.listen(port, host, () => {
   console.log(`Z7i Minecraft agent listening on http://${host}:${port}`);
   void startAlwaysOnServers();
+  startGoogleDriveBackupScheduler();
 });

@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
     if (!body.serverId || !body.projectId) {
       return NextResponse.json({ error: "serverId and projectId are required" }, { status: 400 });
     }
-    const kind: AddonKind = body.kind === "mod" ? "mod" : "plugin";
+    const kind: AddonKind = body.kind === "mod" || body.kind === "datapack" ? body.kind : "plugin";
 
     return NextResponse.json(
       await agentFetch(`/servers/${encodeURIComponent(body.serverId)}/addons/modrinth`, {

@@ -4,6 +4,7 @@ import {
   Activity,
   Badge,
   Circle,
+  Cloud,
   Crosshair,
   Download,
   FileText,
@@ -27,12 +28,15 @@ import {
   Skull,
   Square,
   Terminal,
+  Trash2,
+  Upload,
   Users,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import type {
   AddonKind,
+  DriveBackupStatus,
   FabricLatest,
   FileEntry,
   MinecraftColor,
@@ -52,7 +56,16 @@ type DashboardProps = {
   ownerEmail: string;
 };
 
-type Tab = "overview" | "console" | "files" | "mods" | "plugins" | "players" | "settings";
+type Tab =
+  | "overview"
+  | "console"
+  | "files"
+  | "mods"
+  | "plugins"
+  | "datapacks"
+  | "players"
+  | "backups"
+  | "settings";
 
 const tabs: Array<{ id: Tab; label: string; icon: typeof Gauge }> = [
   { id: "overview", label: "Overview", icon: Gauge },
@@ -60,7 +73,9 @@ const tabs: Array<{ id: Tab; label: string; icon: typeof Gauge }> = [
   { id: "files", label: "Files", icon: FolderTree },
   { id: "mods", label: "Mods", icon: Package },
   { id: "plugins", label: "Plugins", icon: PackageSearch },
+  { id: "datapacks", label: "Datapacks", icon: Download },
   { id: "players", label: "Players", icon: Users },
+  { id: "backups", label: "Backups", icon: Cloud },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -110,6 +125,24 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
+async function requestForm<T>(url: string, formData: FormData): Promise<T> {
+  const response = await fetch(url, {
+    method: "POST",
+    body: formData,
+  });
+  const payload = (await response.json()) as T | { error?: string };
+
+  if (!response.ok) {
+    const message =
+      typeof payload === "object" && payload !== null && "error" in payload && payload.error
+        ? payload.error
+        : "Upload failed";
+    throw new Error(message);
+  }
+
+  return payload as T;
+}
+
 function formatBytes(bytes: number) {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -129,6 +162,14 @@ function coordinateLine(player: PlayerRecord | PlayerDetail | null) {
   }
 
   return `${coordinates.world} ${coordinates.x.toFixed(1)}, ${coordinates.y.toFixed(1)}, ${coordinates.z.toFixed(1)}`;
+}
+
+function statValue(value: number | null | undefined, suffix = "") {
+  if (value === null || typeof value === "undefined" || Number.isNaN(value)) {
+    return "Unavailable";
+  }
+
+  return `${value}${suffix}`;
 }
 
 function StatusDot({ status }: { status: ServerRecord["status"] }) {
@@ -172,13 +213,16 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
   const [settingsName, setSettingsName] = useState("Z7i Minecraft");
   const [settingsMotd, setSettingsMotd] = useState<MotdStyle>(defaultMotd);
   const [settingsAlwaysOn, setSettingsAlwaysOn] = useState(true);
+  const [driveStatus, setDriveStatus] = useState<DriveBackupStatus | null>(null);
+  const [driveFolderId, setDriveFolderId] = useState("");
 
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedId) ?? servers[0] ?? null,
     [selectedId, servers],
   );
 
-  const addonKind: AddonKind = activeTab === "mods" ? "mod" : "plugin";
+  const addonKind: AddonKind =
+    activeTab === "mods" ? "mod" : activeTab === "datapacks" ? "datapack" : "plugin";
   const onlinePlayers = playerSummary?.players.filter((player) => player.online).length ?? 0;
 
   async function refreshServers() {
@@ -219,6 +263,18 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
   }, []);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const drive = params.get("drive");
+    if (!drive) {
+      return;
+    }
+
+    setActiveTab("backups");
+    setNotice(drive === "connected" ? "Google Drive connected" : (params.get("message") ?? "Google Drive failed"));
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+
+  useEffect(() => {
     if (!selectedServer) {
       setLogLines([]);
       return;
@@ -253,6 +309,12 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
       void refreshPlayers();
     }
   }, [activeTab, selectedServer?.id]);
+
+  useEffect(() => {
+    if (activeTab === "backups" && selectedServer && isOwner) {
+      void refreshDriveStatus();
+    }
+  }, [activeTab, selectedServer?.id, isOwner]);
 
   useEffect(() => {
     setAddonHits([]);
@@ -346,6 +408,44 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
     }, "File saved");
   }
 
+  async function uploadFile(file: File, options: { path?: string; kind?: AddonKind } = {}) {
+    if (!selectedServer || !isOwner) {
+      return;
+    }
+
+    await runTask(async () => {
+      const formData = new FormData();
+      formData.set("file", file);
+      formData.set("path", options.path ?? currentDir);
+      if (options.kind) {
+        formData.set("kind", options.kind);
+      }
+
+      const result = await requestForm<{ folder?: string; path: string }>(
+        `/api/servers/${selectedServer.id}/files`,
+        formData,
+      );
+      await loadFiles(result.folder ?? currentDir);
+    }, "File uploaded");
+  }
+
+  async function deleteFile(pathValue: string) {
+    if (!selectedServer || !isOwner || !window.confirm(`Delete ${pathValue}?`)) {
+      return;
+    }
+
+    await runTask(async () => {
+      await requestJson(`/api/servers/${selectedServer.id}/files`, {
+        method: "DELETE",
+        body: JSON.stringify({ path: pathValue }),
+      });
+      if (filePath === pathValue) {
+        setFileContent("");
+      }
+      await loadFiles(currentDir);
+    }, "File deleted");
+  }
+
   function downloadServerZip() {
     if (!selectedServer || !isOwner) {
       return;
@@ -376,12 +476,12 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
     }
 
     await runTask(async () => {
-      await requestJson("/api/addons/install", {
+      const result = await requestJson<{ folder?: string }>("/api/addons/install", {
         method: "POST",
         body: JSON.stringify({ serverId: selectedServer.id, projectId, kind: addonKind }),
       });
-      await loadFiles(addonKind === "mod" ? "mods" : "plugins");
-    }, addonKind === "mod" ? "Mod installed" : "Plugin installed");
+      await loadFiles(result.folder ?? (addonKind === "mod" ? "mods" : addonKind === "datapack" ? "world/datapacks" : "plugins"));
+    }, addonKind === "mod" ? "Mod installed" : addonKind === "datapack" ? "Datapack installed" : "Plugin installed");
   }
 
   async function refreshPlayers() {
@@ -443,6 +543,61 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
       });
       setServers((current) => current.map((server) => (server.id === updated.id ? updated : server)));
     }, "Settings saved");
+  }
+
+  async function refreshDriveStatus() {
+    if (!isOwner) {
+      return;
+    }
+
+    try {
+      const status = await requestJson<DriveBackupStatus>("/api/google-drive/status");
+      setDriveStatus(status);
+      setDriveFolderId(status.folderId ?? "");
+    } catch (caught) {
+      setDriveStatus({
+        credentialsConfigured: false,
+        connected: false,
+        folderId: null,
+        intervalHours: 10,
+        lastBackupAt: null,
+        lastBackupFileId: null,
+        lastBackupFileName: null,
+        lastError: caught instanceof Error ? caught.message : "Google Drive status unavailable",
+        inProgress: false,
+      });
+    }
+  }
+
+  function connectGoogleDrive() {
+    const folderQuery = driveFolderId.trim() ? `?folderId=${encodeURIComponent(driveFolderId.trim())}` : "";
+    window.location.href = `/api/google-drive/connect${folderQuery}`;
+  }
+
+  async function backupToDrive() {
+    if (!selectedServer || !isOwner) {
+      return;
+    }
+
+    await runTask(async () => {
+      const result = await requestJson<{ status: DriveBackupStatus }>("/api/google-drive/backup", {
+        method: "POST",
+        body: JSON.stringify({ serverId: selectedServer.id }),
+      });
+      setDriveStatus(result.status);
+    }, "Google Drive backup finished");
+  }
+
+  async function disconnectGoogleDrive() {
+    if (!isOwner || !window.confirm("Disconnect Google Drive backups?")) {
+      return;
+    }
+
+    await runTask(async () => {
+      const status = await requestJson<DriveBackupStatus>("/api/google-drive/status", { method: "DELETE" });
+      setDriveStatus(status);
+      setDriveFolderId("");
+    }, "Google Drive disconnected");
   }
 
   async function signOut() {
@@ -632,6 +787,20 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
                       <Save size={17} />
                       <span>Save</span>
                     </button>
+                    <label className="tool-button upload-control">
+                      <Upload size={17} />
+                      <span>Upload</span>
+                      <input
+                        type="file"
+                        onChange={(event) => {
+                          const file = event.currentTarget.files?.[0];
+                          event.currentTarget.value = "";
+                          if (file) {
+                            void uploadFile(file);
+                          }
+                        }}
+                      />
+                    </label>
                     <button className="tool-button" onClick={downloadServerZip} type="button">
                       <Download size={17} />
                       <span>ZIP</span>
@@ -641,16 +810,27 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
                     <div className="file-list">
                       <div className="sidebar-label">{currentDir}</div>
                       {entries.map((entry) => (
-                        <button
-                          key={entry.path}
-                          onClick={() =>
-                            entry.type === "directory" ? void loadFiles(entry.path) : void openFile(entry.path)
-                          }
-                        >
-                          {entry.type === "directory" ? <Folder size={16} /> : <FileText size={16} />}
-                          <span>{entry.name}</span>
-                          <small>{entry.type === "file" ? formatBytes(entry.size) : ""}</small>
-                        </button>
+                        <div key={entry.path} className="file-row">
+                          <button
+                            className="file-open"
+                            onClick={() =>
+                              entry.type === "directory" ? void loadFiles(entry.path) : void openFile(entry.path)
+                            }
+                          >
+                            {entry.type === "directory" ? <Folder size={16} /> : <FileText size={16} />}
+                            <span>{entry.name}</span>
+                            <small>{entry.type === "file" ? formatBytes(entry.size) : ""}</small>
+                          </button>
+                          {entry.type === "file" ? (
+                            <button
+                              className="file-delete"
+                              onClick={() => void deleteFile(entry.path)}
+                              title="Delete file"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          ) : null}
+                        </div>
                       ))}
                     </div>
                     <textarea
@@ -665,19 +845,42 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
             </div>
           ) : null}
 
-          {selectedServer && (activeTab === "mods" || activeTab === "plugins") ? (
+          {selectedServer && (activeTab === "mods" || activeTab === "plugins" || activeTab === "datapacks") ? (
             <div className="addons-view">
               <form className="search-row" onSubmit={searchAddons}>
                 <Search size={18} />
                 <input
                   value={addonQuery}
                   onChange={(event) => setAddonQuery(event.target.value)}
-                  placeholder={addonKind === "mod" ? "sodium, lithium, fabric api" : "luckperms, geyser, vault"}
+                  placeholder={
+                    addonKind === "mod"
+                      ? "sodium, lithium, fabric api"
+                      : addonKind === "datapack"
+                        ? "vanilla tweaks, terralith, blazeandcave"
+                        : "luckperms, geyser, vault"
+                  }
                 />
                 <button className="tool-button">
                   <Search size={17} />
                   <span>Search</span>
                 </button>
+                {isOwner ? (
+                  <label className="tool-button upload-control">
+                    <Upload size={17} />
+                    <span>Upload</span>
+                    <input
+                      type="file"
+                      accept={addonKind === "datapack" ? ".zip" : ".jar"}
+                      onChange={(event) => {
+                        const file = event.currentTarget.files?.[0];
+                        event.currentTarget.value = "";
+                        if (file) {
+                          void uploadFile(file, { kind: addonKind });
+                        }
+                      }}
+                    />
+                  </label>
+                ) : null}
               </form>
               <div className="addon-list panel-scroll">
                 {addonHits.map((hit) => (
@@ -735,8 +938,9 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
                         </div>
                       </div>
                       <div className="player-grid">
-                        <Metric icon={HeartPulse} label="Health" value={String(playerDetail.health ?? "-")} />
-                        <Metric icon={Gauge} label="Food" value={String(playerDetail.foodLevel ?? "-")} />
+                        <Metric icon={HeartPulse} label="HP" value={statValue(playerDetail.health)} />
+                        <Metric icon={Gauge} label="Food" value={statValue(playerDetail.foodLevel)} />
+                        <Metric icon={Badge} label="XP" value={statValue(playerDetail.xpLevel)} />
                         <Metric icon={Crosshair} label="Coords" value={coordinateLine(playerDetail)} />
                       </div>
                       {isOwner ? (
@@ -823,6 +1027,75 @@ export default function Dashboard({ userEmail, isOwner, ownerEmail }: DashboardP
                     <span>Save settings</span>
                   </button>
                 </form>
+              ) : null}
+            </div>
+          ) : null}
+
+          {selectedServer && activeTab === "backups" ? (
+            <div className="settings-view panel-scroll">
+              {!isOwner ? <LockedPanel /> : null}
+              {isOwner ? (
+                <div className="backup-panel">
+                  <div className="section-head">
+                    <h2>Google Drive backups</h2>
+                    <button className="icon-button" type="button" onClick={() => void refreshDriveStatus()} title="Refresh">
+                      <RefreshCw size={17} />
+                    </button>
+                  </div>
+                  <div className="backup-grid">
+                    <label>
+                      Folder ID
+                      <input value={driveFolderId} onChange={(event) => setDriveFolderId(event.target.value)} />
+                    </label>
+                    <Metric
+                      icon={Cloud}
+                      label="Drive"
+                      value={
+                        !driveStatus?.credentialsConfigured
+                          ? "Not configured"
+                          : driveStatus.connected
+                            ? "Connected"
+                            : "Disconnected"
+                      }
+                    />
+                    <Metric
+                      icon={Download}
+                      label="Last backup"
+                      value={driveStatus?.lastBackupAt ? new Date(driveStatus.lastBackupAt).toLocaleString() : "Never"}
+                    />
+                    <Metric icon={ListRestart} label="Interval" value={`${driveStatus?.intervalHours ?? 10}h`} />
+                  </div>
+                  {driveStatus?.lastError ? <span className="error-line">{driveStatus.lastError}</span> : null}
+                  <div className="player-actions">
+                    <button
+                      className="tool-button"
+                      type="button"
+                      onClick={connectGoogleDrive}
+                      disabled={!driveStatus?.credentialsConfigured}
+                    >
+                      <Cloud size={17} />
+                      <span>{driveStatus?.connected ? "Reconnect" : "Connect"}</span>
+                    </button>
+                    <button
+                      className="tool-button"
+                      type="button"
+                      onClick={() => void backupToDrive()}
+                      disabled={!driveStatus?.connected || driveStatus.inProgress}
+                    >
+                      <Upload size={17} />
+                      <span>Backup now</span>
+                    </button>
+                    <button
+                      className="tool-button danger-button"
+                      type="button"
+                      onClick={() => void disconnectGoogleDrive()}
+                      disabled={!driveStatus?.connected}
+                    >
+                      <Trash2 size={17} />
+                      <span>Disconnect</span>
+                    </button>
+                  </div>
+                </div>
               ) : null}
             </div>
           ) : null}

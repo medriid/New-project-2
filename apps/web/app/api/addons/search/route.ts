@@ -20,11 +20,14 @@ export async function GET(request: NextRequest) {
   try {
     const query = request.nextUrl.searchParams.get("q") ?? "";
     const gameVersion = request.nextUrl.searchParams.get("gameVersion") ?? "";
-    const kind: AddonKind = request.nextUrl.searchParams.get("kind") === "mod" ? "mod" : "plugin";
+    const rawKind = request.nextUrl.searchParams.get("kind");
+    const kind: AddonKind = rawKind === "mod" || rawKind === "datapack" ? rawKind : "plugin";
     const facets =
       kind === "mod"
         ? [["project_type:mod"], ["categories:fabric"]]
-        : [["categories:paper"], ["server_side:required"]];
+        : kind === "datapack"
+          ? [["project_type:datapack"]]
+          : [["categories:paper"], ["server_side:required"]];
 
     if (gameVersion) {
       facets.push([`versions:${gameVersion}`]);
